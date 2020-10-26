@@ -1,4 +1,4 @@
-name: test
+name: CI
 
 on:
   - push
@@ -20,3 +20,20 @@ jobs:
           override: true
       - name: Run tests
         run: cargo test --all
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install libusb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-dev libusb-1.0
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: clippy
+      - uses: actions-rs/clippy-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
