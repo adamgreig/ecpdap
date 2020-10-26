@@ -17,6 +17,8 @@ pub enum Error {
     Clock,
     #[error("probe reported error while running JTAG sequence")]
     JTAG,
+    #[error("internal error: JTAG request too long")]
+    JTAGTooLong,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -111,7 +113,8 @@ impl DAP {
         log::trace!("Setting NRST to {}", state);
         let state = (state as u8) << 7;
         let select = 1 << 7;
-        let request = Request { command: Command::DAP_SWJ_Pins, data: vec![state, select, 0] };
+        let request = Request { command: Command::DAP_SWJ_Pins,
+                                data: vec![state, select, 0, 0, 0, 0] };
         self.execute(request)?;
         Ok(())
     }
@@ -138,6 +141,11 @@ impl DAP {
 
     pub fn jtag_sequence(&self, data: &[u8]) -> Result<Vec<u8>> {
         log::trace!("Running JTAG sequence");
+        if data.len() > self.packet_size - 1 {
+            log::error!("Attempted JTAG sequence of length {} which exceeds packet size {}",
+                        data.len(), self.packet_size);
+            return Err(Error::JTAGTooLong);
+        }
         let request = Request { command: Command::DAP_JTAG_Sequence, data: data.to_vec() };
         let response = self.execute(request)?;
         match response.get(1) {
@@ -191,15 +199,17 @@ enum ResponseStatus {
 #[derive(Copy, Clone, IntoPrimitive)]
 #[allow(non_camel_case_types)]
 #[repr(u8)]
-pub enum DAPInfoID {
+enum DAPInfoID {
     Capabilities        = 0xF0,
     MaxPacketSize       = 0xFF,
 }
 
 #[derive(Copy, Clone, IntoPrimitive)]
 #[repr(u8)]
-pub enum HostStatusType {
+enum HostStatusType {
     Connect             = 0,
+
+    #[allow(unused)]
     Running             = 1,
 }
 
@@ -218,19 +228,16 @@ enum ConnectPortResponse {
     JTAG                = 2,
 }
 
-pub struct Request {
+struct Request {
     command: Command,
     data: Vec<u8>,
 }
 
 impl Request {
-    fn to_bytes(mut self) -> Vec<u8> {
-        // Add command byte
-        self.data.insert(0, self.command.into());
-
-        // Add 0 byte for HID report ID
-        self.data.insert(0, 0);
-
-        self.data
+    fn to_bytes(self) -> Vec<u8> {
+        // Insert command ID as first byte.
+        let mut bytes = vec![self.command.into()];
+        bytes.extend_from_slice(&self.data[..]);
+        bytes
     }
 }

@@ -139,11 +139,19 @@ impl Probe {
     pub fn write(&self, buf: &[u8]) -> Result<usize> {
         log::trace!("TX: {:02X?}", buf);
         match self {
-            Self::V1(device) => Ok(device.write(buf)?),
+            Self::V1(device) => {
+                let mut buf = buf.to_vec();
+                // Extend buffer to 64 bytes for HID access, which requires
+                // exactly report-sized packets.  We can't in general find
+                // out what the report size is, but 64 is very common.
+                buf.resize(64, 0);
+                // Insert HID report ID at start.
+                buf.insert(0, 0);
+                Ok(device.write(&buf[..])?)
+            },
             Self::V2 { handle, out_ep, in_ep: _ } => {
                 let timeout = Duration::from_millis(100);
-                // Skip first byte, which is set to 0 for HID transfers.
-                Ok(handle.write_bulk(*out_ep, &buf[1..], timeout)?)
+                Ok(handle.write_bulk(*out_ep, buf, timeout)?)
             },
         }
     }

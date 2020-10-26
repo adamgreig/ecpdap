@@ -1,12 +1,13 @@
 use std::fs::File;
 use std::io::prelude::*;
-use std::time::Instant;
+use std::time::{Instant, Duration};
 use clap::{Arg, App, AppSettings, SubCommand};
 use clap::{value_t, crate_description, crate_version};
 
 use ecpdap::probe::{Probe, ProbeInfo};
 use ecpdap::dap::DAP;
 use ecpdap::jtag::JTAG;
+use ecpdap::ecp5::ECP5;
 
 #[allow(clippy::cognitive_complexity)]
 fn main() -> anyhow::Result<()> {
@@ -30,12 +31,19 @@ fn main() -> anyhow::Result<()> {
              .short("p")
              .takes_value(true)
              .global(true))
+        .arg(Arg::with_name("freq")
+             .help("JTAG clock frequency to use, in kHz")
+             .long("freq")
+             .short("f")
+             .takes_value(true)
+             .default_value("1000")
+             .global(true))
         .subcommand(SubCommand::with_name("probes")
             .about("List available CMSIS-DAP probes"))
         .subcommand(SubCommand::with_name("scan")
             .about("Scan JTAG chain for ECP5 IDCODEs"))
         .subcommand(SubCommand::with_name("reset")
-            .about("Pulse the JTAG nRST line"))
+            .about("Pulse the JTAG nRST line for 100ms"))
         .subcommand(SubCommand::with_name("program")
             .about("Program ECP5 SRAM with bitstream")
             .arg(Arg::with_name("file")
@@ -95,12 +103,32 @@ fn main() -> anyhow::Result<()> {
         Probe::new()?
     };
 
-    let jtag = JTAG::new(DAP::new(probe)?)?;
+    let dap = DAP::new(probe)?;
+    let jtag = JTAG::new(dap)?;
+
+    match value_t!(matches, "freq", u32) {
+        Ok(freq) => jtag.set_clock(freq * 1000)?,
+        Err(e) => {
+            drop(jtag);
+            e.exit();
+        }
+    }
 
     match matches.subcommand_name() {
-        Some("scan") => {},
-        Some("reset") => {},
-        Some("program") => {},
+        Some("scan") => {
+            let (code, _) = ECP5::scan(&jtag)?;
+            println!("Found {}", code.name());
+        },
+        Some("reset") => jtag.pulse_nrst(Duration::from_millis(100))?,
+        Some("program") => {
+            let ecp5 = ECP5::new(&jtag)?;
+            let matches = matches.subcommand_matches("program").unwrap();
+            let path = matches.value_of("file").unwrap();
+            let mut file = File::open(path)?;
+            let mut data = Vec::new();
+            file.read_to_end(&mut data)?;
+            ecp5.program(&data)?;
+        },
         Some("flash") => {
             let matches = matches.subcommand_matches("flash").unwrap();
             match matches.subcommand_name() {

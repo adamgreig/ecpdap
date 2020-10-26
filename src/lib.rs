@@ -7,6 +7,7 @@ use thiserror::Error;
 pub mod probe;
 pub mod dap;
 pub mod jtag;
+pub mod ecp5;
 
 #[derive(Error, Debug)]
 pub enum Error {
