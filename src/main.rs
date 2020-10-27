@@ -152,7 +152,7 @@ fn main() -> anyhow::Result<()> {
 
 fn print_probe_list() {
     let probes = ProbeInfo::list();
-    if probes.len() == 0 {
+    if probes.is_empty() {
         println!("No CMSIS-DAP probes found.");
     } else {
         println!("Found {} CMSIS-DAP probe{}:", probes.len(),

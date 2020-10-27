@@ -43,7 +43,7 @@ impl Probe {
     pub fn new() -> Result<Probe> {
         log::debug!("Attempting to open any connected probe");
         let probes = ProbeInfo::list();
-        if probes.len() == 0 {
+        if probes.is_empty() {
             Err(Error::NoProbesFound)
         } else if probes.len() > 1 {
             Err(Error::MultipleProbesFound)
@@ -181,7 +181,7 @@ impl ProbeInfo {
 
     /// Create a ProbeInfo from a specifier string.
     pub fn from_specifier(spec: &str) -> Result<Self> {
-        let parts: Vec<&str> = spec.split(":").collect();
+        let parts: Vec<&str> = spec.split(':').collect();
         if parts.len() < 2 || parts.len() > 3 {
             return Err(Error::InvalidSpecifier);
         }
@@ -249,8 +249,8 @@ impl ProbeInfo {
 
 impl std::fmt::Display for ProbeInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = self.name.clone().unwrap_or("Unknown".to_owned());
-        let sn = self.sn.clone().unwrap_or("".to_owned());
+        let name = self.name.clone().unwrap_or_else(|| "Unknown".to_owned());
+        let sn = self.sn.clone().unwrap_or_else(|| "".to_owned());
         write!(f, "{:04x}:{:04x}:{} {}", self.vid, self.pid, sn, name)
     }
 }

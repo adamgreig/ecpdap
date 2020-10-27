@@ -286,7 +286,7 @@ impl<'a> ECP5<'a> {
                 return Ok((ecp5, idx));
             }
         }
-        Err(Error::ECP5NotFound)?
+        Err(Error::ECP5NotFound)
     }
 
     /// Create a new ECP5 instance from a JTAG interface
@@ -304,7 +304,7 @@ impl<'a> ECP5<'a> {
             }
         }
 
-        Err(Error::ECP5NotFound)?
+        Err(Error::ECP5NotFound)
     }
 
     /// Read ECP5 status word

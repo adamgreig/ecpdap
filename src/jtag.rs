@@ -194,18 +194,16 @@ impl<'a> Sequence<'a> {
         self.request(len, tms, None, true)
     }
 
-    fn to_bytes(self) -> Vec<u8> {
+    fn to_bytes(&self) -> Vec<u8> {
         let mut request = vec![self.num_sequences as u8];
         request.extend_from_slice(&self.request[..]);
         request
     }
 
     pub fn execute(self) -> Result<Vec<u8>> {
-        let rxlen = self.capture_length;
-        let dap = self.dap;
         let request = self.to_bytes();
-        let result = dap.jtag_sequence(&request[..])?;
-        if result.len() == rxlen {
+        let result = self.dap.jtag_sequence(&request[..])?;
+        if result.len() == self.capture_length {
             Ok(result)
         } else {
             Err(Error::UnexpectedJTAGLength)

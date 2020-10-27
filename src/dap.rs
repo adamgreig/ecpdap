@@ -234,7 +234,7 @@ struct Request {
 }
 
 impl Request {
-    fn to_bytes(self) -> Vec<u8> {
+    fn to_bytes(&self) -> Vec<u8> {
         // Insert command ID as first byte.
         let mut bytes = vec![self.command.into()];
         bytes.extend_from_slice(&self.data[..]);
