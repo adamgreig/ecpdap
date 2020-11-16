@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::time::{Instant, Duration};
 use clap::{Arg, App, AppSettings, SubCommand};
-use clap::{value_t, crate_description, crate_version};
+use clap::{value_t, values_t, crate_description, crate_version};
 
 use ecpdap::probe::{Probe, ProbeInfo};
 use ecpdap::dap::DAP;
@@ -38,10 +38,29 @@ fn main() -> anyhow::Result<()> {
              .takes_value(true)
              .default_value("1000")
              .global(true))
+        .arg(Arg::with_name("tap")
+             .help("ECP5's TAP position in scan chain (0-indexed, see `scan` output)")
+             .long("tap")
+             .short("t")
+             .takes_value(true)
+             .global(true))
+        .arg(Arg::with_name("ir-lengths")
+             .help("Lengths of each IR, starting from TAP 0, comma-separated")
+             .long("ir-lengths")
+             .multiple(true)
+             .require_delimiter(true)
+             .takes_value(true)
+             .global(true))
+        .arg(Arg::with_name("scan-chain-length")
+             .help("Maximum JTAG scan chain length in bits, for both IR and DR")
+             .long("scan-chain-length")
+             .takes_value(true)
+             .default_value("128")
+             .global(true))
         .subcommand(SubCommand::with_name("probes")
             .about("List available CMSIS-DAP probes"))
         .subcommand(SubCommand::with_name("scan")
-            .about("Scan JTAG chain for ECP5 IDCODEs"))
+            .about("Scan JTAG chain and detect ECP5 IDCODEs"))
         .subcommand(SubCommand::with_name("reset")
             .about("Pulse the JTAG nRST line for 100ms"))
         .subcommand(SubCommand::with_name("program")
@@ -50,7 +69,7 @@ fn main() -> anyhow::Result<()> {
                  .help("File to program to ECP5")
                  .required(true)))
         .subcommand(SubCommand::with_name("flash")
-            .about("Access SPI flash attached to ECP5")
+            .about("Access SPI flash attached to ECP5 when no other devices on JTAG chain")
             .setting(AppSettings::SubcommandRequiredElseHelp)
             .subcommand(SubCommand::with_name("id")
                 .about("Read SPI flash ID"))
@@ -66,7 +85,7 @@ fn main() -> anyhow::Result<()> {
                      .long("offset")
                      .default_value("0"))
                 .arg(Arg::with_name("no-verify")
-                     .help("Disable automatic readback verification")
+                     .help("Disable readback verification")
                      .short("n")
                      .long("no-verify")))
             .subcommand(SubCommand::with_name("read")
@@ -104,7 +123,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     let dap = DAP::new(probe)?;
-    let jtag = JTAG::new(dap)?;
+    let mut jtag = JTAG::new(dap);
 
     match value_t!(matches, "freq", u32) {
         Ok(freq) => jtag.set_clock(freq * 1000)?,
@@ -114,13 +133,38 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    match value_t!(matches, "scan-chain-length", usize) {
+        Ok(max_length) => jtag.set_max_length(max_length),
+        Err(e) => {
+            drop(jtag);
+            e.exit();
+        }
+    }
+
+    let ir_lens = if matches.is_present("ir-lengths") {
+        match values_t!(matches, "ir-lengths", usize) {
+            Ok(lengths) => Some(lengths),
+            Err(e) => {
+                drop(jtag);
+                log::error!("Could not parse ir-lengths");
+                e.exit();
+            }
+        }
+    } else {
+        None
+    };
+
     match matches.subcommand_name() {
         Some("scan") => {
+            jtag.scan(ir_lens.as_deref())?;
+            /*
             let (code, _) = ECP5::scan(&jtag)?;
             println!("Found {}", code.name());
+            */
         },
         Some("reset") => jtag.pulse_nrst(Duration::from_millis(100))?,
         Some("program") => {
+            /*
             let ecp5 = ECP5::new(&jtag)?;
             let matches = matches.subcommand_matches("program").unwrap();
             let path = matches.value_of("file").unwrap();
@@ -128,8 +172,10 @@ fn main() -> anyhow::Result<()> {
             let mut data = Vec::new();
             file.read_to_end(&mut data)?;
             ecp5.program(&data)?;
+            */
         },
         Some("flash") => {
+            /*
             let matches = matches.subcommand_matches("flash").unwrap();
             match matches.subcommand_name() {
                 Some("id") => {},
@@ -138,6 +184,7 @@ fn main() -> anyhow::Result<()> {
                 Some("read") => {},
                 _ => panic!("Unhandled flash subcommand."),
             }
+            */
         },
         _ => panic!("Unhandled command."),
     }

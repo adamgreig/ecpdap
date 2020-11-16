@@ -275,10 +275,15 @@ pub struct ECP5<'a> {
 }
 
 impl<'a> ECP5<'a> {
+    /*
     /// Given a JTAG interface, scan for an ECP5.
     ///
     /// Returns the detected ECP5 and its scan chain index.
     pub fn scan(jtag: &JTAG) -> Result<(ECP5IDCODE, usize)> {
+        if !jtag.check_chain()? {
+            return Err(JTAGError::ScanChainBroken)?;
+        }
+
         let idcodes = jtag.idcodes()?;
 
         for (idx, idcode) in idcodes.iter().enumerate() {
@@ -288,12 +293,14 @@ impl<'a> ECP5<'a> {
         }
         Err(Error::ECP5NotFound)
     }
+    */
 
     /// Create a new ECP5 instance from a JTAG interface
     pub fn new(jtag: &'a JTAG) -> Result<Self> {
         Ok(Self { jtag })
     }
 
+    /*
     /// Find an ECP5 on the scan chain and print its ID
     pub fn id(&self) -> Result<ECP5IDCODE> {
         let idcodes = self.jtag.idcodes()?;
@@ -314,6 +321,7 @@ impl<'a> ECP5<'a> {
         let status = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         Ok(Status::new(status))
     }
+    */
 
     /*
     /// Swap to SPI flash access mode.
@@ -334,6 +342,7 @@ impl<'a> ECP5<'a> {
     }
     */
 
+    /*
     /// Program the ECP5 configuration SRAM.
     ///
     /// The ECP5 will be reset and start configuration after programming completion.
@@ -351,8 +360,8 @@ impl<'a> ECP5<'a> {
 
         // Enter Shift-DR
         self.jtag.sequence()
-            .mode(1, 1)
-            .mode(2, 0)
+            .mode(1, 1)?
+            .mode(2, 0)?
             .execute()?;
 
         // Load in entire bitstream
@@ -360,15 +369,15 @@ impl<'a> ECP5<'a> {
             let mut seq = self.jtag.sequence();
             for chunk in group.chunks(8) {
                 let tdi: Vec<u8> = chunk.iter().map(|x| x.reverse_bits()).collect();
-                seq = seq.write(tdi.len() * 8, 0, &tdi);
+                seq = seq.write(tdi.len() * 8, 0, &tdi)?;
             }
             seq.execute()?;
         }
 
         // Return to Run-Test/Idle
         self.jtag.sequence()
-            .mode(2, 1)
-            .mode(1, 0)
+            .mode(2, 1)?
+            .mode(1, 0)?
             .execute()?;
 
         // Disable configuration
@@ -384,6 +393,7 @@ impl<'a> ECP5<'a> {
     fn command(&self, command: Command) -> Result<()> {
         Ok(self.jtag.write_ir(&[command as u8], 8)?)
     }
+    */
 }
 
 /*

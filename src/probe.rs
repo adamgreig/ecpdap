@@ -1,3 +1,8 @@
+//! This is the lowest-level module. It is responsible for scanning the USB bus
+//! to find a CMSIS-DAP probe, and reading and writing packets to it. Both CMSIS-DAP
+//! v1 and v2 probes are supported; v1 probes use `hidapi` to communicate with HID
+//! reports, while v2 probes use `rusb` to directly read/write the v2 bulk endpoint.
+
 use std::time::Duration;
 use thiserror::Error;
 use rusb::{Device, Context, UsbContext};

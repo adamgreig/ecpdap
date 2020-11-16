@@ -4,6 +4,9 @@
 
 use thiserror::Error;
 
+#[macro_use]
+pub mod bitvec;
+
 pub mod probe;
 pub mod dap;
 pub mod jtag;

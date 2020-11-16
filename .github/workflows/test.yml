@@ -22,6 +22,7 @@ jobs:
         run: cargo test --all
   lint:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - name: Install libusb
         run: |

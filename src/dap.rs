@@ -1,3 +1,7 @@
+//! The DAP module implements the CMSIS-DAP commands relevant to JTAG programming,
+//! formatting them into packets which can be exchanged with the Probe module to
+//! control the CMSIS-DAP probe.
+
 use std::{time::Duration, thread};
 use thiserror::Error;
 use num_enum::IntoPrimitive;
@@ -191,9 +195,6 @@ enum Command {
 #[repr(u8)]
 enum ResponseStatus {
     DAP_OK              = 0x00,
-
-    #[allow(unused)]
-    DAP_ERROR           = 0xFF,
 }
 
 #[derive(Copy, Clone, IntoPrimitive)]
@@ -208,9 +209,6 @@ enum DAPInfoID {
 #[repr(u8)]
 enum HostStatusType {
     Connect             = 0,
-
-    #[allow(unused)]
-    Running             = 1,
 }
 
 #[derive(Copy, Clone, IntoPrimitive)]
@@ -222,9 +220,6 @@ enum ConnectPort {
 #[derive(Copy, Clone, IntoPrimitive)]
 #[repr(u8)]
 enum ConnectPortResponse {
-    #[allow(unused)]
-    Failed              = 0,
-
     JTAG                = 2,
 }
 
