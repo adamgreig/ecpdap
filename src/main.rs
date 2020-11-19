@@ -1,13 +1,14 @@
-use std::fs::File;
-use std::io::prelude::*;
+//use std::fs::File;
+//use std::io::prelude::*;
 use std::time::{Instant, Duration};
 use clap::{Arg, App, AppSettings, SubCommand};
 use clap::{value_t, values_t, crate_description, crate_version};
+use anyhow::bail;
 
 use ecpdap::probe::{Probe, ProbeInfo};
 use ecpdap::dap::DAP;
-use ecpdap::jtag::JTAG;
-use ecpdap::ecp5::ECP5;
+use ecpdap::jtag::{JTAG, JTAGChain};
+//use ecpdap::ecp5::ECP5;
 
 #[allow(clippy::cognitive_complexity)]
 fn main() -> anyhow::Result<()> {
@@ -55,7 +56,7 @@ fn main() -> anyhow::Result<()> {
              .help("Maximum JTAG scan chain length in bits, for both IR and DR")
              .long("scan-chain-length")
              .takes_value(true)
-             .default_value("128")
+             .default_value("192")
              .global(true))
         .subcommand(SubCommand::with_name("probes")
             .about("List available CMSIS-DAP probes"))
@@ -122,9 +123,16 @@ fn main() -> anyhow::Result<()> {
         Probe::new()?
     };
 
+    // Create a JTAG interface using the probe.
     let dap = DAP::new(probe)?;
     let mut jtag = JTAG::new(dap);
 
+    // At this point we can handle the reset command.
+    if matches.subcommand_name().unwrap() == "reset" {
+        return Ok(jtag.pulse_nrst(Duration::from_millis(100))?);
+    }
+
+    // If the user specified a JTAG clock frequency, apply it now.
     match value_t!(matches, "freq", u32) {
         Ok(freq) => jtag.set_clock(freq * 1000)?,
         Err(e) => {
@@ -133,6 +141,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // If the user specified a JTAG scan chain length, apply it now.
     match value_t!(matches, "scan-chain-length", usize) {
         Ok(max_length) => jtag.set_max_length(max_length),
         Err(e) => {
@@ -141,12 +150,12 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // If the user specified IR lengths, parse and save them.
     let ir_lens = if matches.is_present("ir-lengths") {
         match values_t!(matches, "ir-lengths", usize) {
             Ok(lengths) => Some(lengths),
             Err(e) => {
                 drop(jtag);
-                log::error!("Could not parse ir-lengths");
                 e.exit();
             }
         }
@@ -154,15 +163,46 @@ fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Scan the JTAG chain to detect all available TAPs.
+    let chain = jtag.scan(ir_lens.as_deref())?;
+
+    // At this point we can handle the 'scan' command.
+    if matches.subcommand_name().unwrap() == "scan" {
+        print_jtag_chain(&chain);
+        return Ok(());
+    }
+
+    // If the user specified a TAP, we'll use it, but otherwise
+    // attempt to find a single ECP5 in the scan chain.
+    let tap_idx = if matches.is_present("tap") {
+        match value_t!(matches, "tap", usize) {
+            Ok(tap) => if chain.check_idx(tap) {
+                log::debug!("Provided tap index is an ECP5");
+                tap
+            } else {
+                print_jtag_chain(&chain);
+                bail!("The provided tap index {} does not have an ECP5 IDCODE.", tap);
+            },
+            Err(e) => {
+                drop(jtag);
+                e.exit();
+            }
+        }
+    } else {
+        match chain.auto_idx() {
+            Some(index) => index,
+            None => {
+                print_jtag_chain(&chain);
+                bail!("Could not find an ECP5 IDCODE in the JTAG chain.");
+            }
+        }
+    };
+
+    // Create a TAP instance, consuming the JTAG instance.
+    let tap = jtag.to_tap(chain, tap_idx);
+
+    // We can finally handle 'program' and 'flash' commands.
     match matches.subcommand_name() {
-        Some("scan") => {
-            jtag.scan(ir_lens.as_deref())?;
-            /*
-            let (code, _) = ECP5::scan(&jtag)?;
-            println!("Found {}", code.name());
-            */
-        },
-        Some("reset") => jtag.pulse_nrst(Duration::from_millis(100))?,
         Some("program") => {
             /*
             let ecp5 = ECP5::new(&jtag)?;
@@ -207,5 +247,12 @@ fn print_probe_list() {
         for probe in probes {
             println!("  {}", probe);
         }
+    }
+}
+
+fn print_jtag_chain(chain: &JTAGChain) {
+    println!("Detected JTAG chain, closest to TDO first:");
+    for line in chain.to_lines() {
+        println!(" - {}", line);
     }
 }

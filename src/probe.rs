@@ -10,13 +10,13 @@ use hidapi::HidApi;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("invalid specifier, use VID:PID or VID:PID:Serial")]
+    #[error("invalid specifier, use VID:PID or VID:PID:Serial.")]
     InvalidSpecifier,
-    #[error("specified probe not found")]
+    #[error("specified probe not found.")]
     NotFound,
-    #[error("no CMSIS-DAP probes found")]
+    #[error("no CMSIS-DAP probes found.")]
     NoProbesFound,
-    #[error("multiple CMSIS-DAP probes found, select a specific probe")]
+    #[error("multiple CMSIS-DAP probes found, select a specific probe.")]
     MultipleProbesFound,
     #[error("USB error")]
     USB(#[from] rusb::Error),

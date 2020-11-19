@@ -9,19 +9,19 @@ use crate::probe::{Probe, Error as ProbeError};
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("probe error")]
+    #[error("Probe error")]
     Probe(#[from] ProbeError),
-    #[error("probe does not support JTAG mode")]
+    #[error("Probe does not support JTAG mode.")]
     NoJTAG,
-    #[error("invalid response from probe")]
+    #[error("Invalid response from probe.")]
     InvalidResponse,
-    #[error("probe reported error during connect")]
+    #[error("Probe reported error during connect.")]
     Connection,
-    #[error("probe reported error setting clock frequency")]
+    #[error("Probe reported error setting clock frequency.")]
     Clock,
-    #[error("probe reported error while running JTAG sequence")]
+    #[error("Probe reported error while running JTAG sequence.")]
     JTAG,
-    #[error("internal error: JTAG request too long")]
+    #[error("Internal error: JTAG request too long.")]
     JTAGTooLong,
     #[error(transparent)]
     Other(#[from] anyhow::Error),

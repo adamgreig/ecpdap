@@ -7,23 +7,26 @@
 use std::time::Duration;
 use crate::dap::{DAP, Error as DAPError};
 use crate::bitvec::{bits_to_bytes, bytes_to_bits, drain_u32, Error as BitVecError};
+use crate::ecp5::ECP5IDCODE;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Unexpected JTAG length returned from probe")]
+    #[error("Unexpected JTAG length returned from probe.")]
     UnexpectedJTAGLength,
-    #[error("Internal error: invalid JTAG sequence")]
+    #[error("Internal error: invalid JTAG sequence.")]
     InvalidSequence,
-    #[error("JTAG scan chain broken: check connection")]
+    #[error("JTAG scan chain broken: check connection or try a larger --scan-chain-length.")]
     ScanChainBroken,
-    #[error("Internal error: Tried to run sequences without providing a DAP")]
+    #[error("Internal error: Tried to run sequences without providing a DAP.")]
     NoDAPProvided,
-    #[error("Internal error: Unexpected JTAG state")]
+    #[error("Internal error: Unexpected JTAG state.")]
     BadState,
-    #[error("Invalid IDCODE detected")]
+    #[error("Invalid IDCODE detected.")]
     InvalidIDCODE,
-    #[error("Error scanning IR lengths")]
+    #[error("Error scanning IR lengths.")]
     InvalidIR,
+    #[error("Invalid index: does not exist in JTAG scan chain.")]
+    InvalidTAPIndex,
     #[error("Bit vector error")]
     BitVec(#[from] BitVecError),
     #[error("DAP error")]
@@ -86,15 +89,28 @@ impl JTAG {
         Ok(self.dap.pulse_nrst(duration)?)
     }
 
-    /// Scan JTAG chain for IDCODEs.
+    /// Scan JTAG chain, detecting TAPs and their IDCODEs and IR lengths.
     ///
-    /// Returns a Vec of Option<IDCODE>, which are Some(IDCODE) for detected IDCODEs
-    /// and are None for detected BYPASS.
-    pub fn scan(&mut self, ir_lengths: Option<&[usize]>) -> Result<Vec<Option<IDCODE>>> {
+    /// If IR lengths for each TAP are known, provide them in `ir_lengths`.
+    ///
+    /// Returns a new JTAGChain, which contains detected IDCODEs and
+    /// can be used to create a JTAGTAP at a specific index.
+    pub fn scan(&mut self, ir_lengths: Option<&[usize]>) -> Result<JTAGChain> {
         let (ir, dr) = self.reset_scan()?;
         let idcodes = extract_idcodes(&dr)?;
-        extract_ir_lens(&ir, idcodes.len(), ir_lengths)?;
-        Ok(idcodes)
+        let irlens = extract_ir_lengths(&ir, idcodes.len(), ir_lengths)?;
+        Ok(JTAGChain::new(&idcodes, &irlens))
+    }
+
+    /// Create a new JTAG TAP, allowing read/write access to a single TAP
+    /// on the chain.
+    pub fn to_tap(self, chain: JTAGChain, index: usize) -> Result<JTAGTAP> {
+        if index < chain.n_taps() {
+            Ok(JTAGTAP::new(self, chain, index))
+        } else {
+            log::error!("Requested TAP {}, but there are only {} TAPs.", index, chain.n_taps());
+            Err(Error::InvalidTAPIndex)
+        }
     }
 
     /// Force all TAPs into Test-Logic-Reset state from any current state.
@@ -418,7 +434,7 @@ impl JTAG {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub struct IDCODE(u32);
+pub struct IDCODE(pub u32);
 
 impl IDCODE {
     pub fn valid(&self) -> bool {
@@ -450,11 +466,18 @@ impl IDCODE {
     pub fn version(&self) -> u8 {
         ((self.0 >> 28) & 0xF) as u8
     }
+
+    /// Convert to an ECP5IDCODE if this IDCODE belongs to an ECP5.
+    pub fn try_to_ecp5(&self) -> Option<ECP5IDCODE> {
+        ECP5IDCODE::try_from_idcode(self)
+    }
 }
 
 impl std::fmt::Display for IDCODE {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(mfn) = self.manufacturer_name() {
+        if let Some(ecp5) = self.try_to_ecp5() {
+            write!(f, "0x{:08X} ECP5 {}", self.0, ecp5.name())
+        } else if let Some(mfn) = self.manufacturer_name() {
             write!(f, "0x{:08X} ({})", self.0, mfn)
         } else {
             write!(f, "0x{:08X}", self.0)
@@ -472,17 +495,108 @@ fn test_idcode() {
     assert_eq!(idcode.version(), 0b1010);
     assert!(format!("{}", idcode) == "0xA0F0FEAB");
 
+    // Example IDCODE from an ARM Cortex-M.
+    let idcode = IDCODE(0x3BA00477);
+    assert_eq!(idcode.manufacturer_name(), Some("ARM Ltd"));
+    assert_eq!(idcode.try_to_ecp5(), None);
+    assert_eq!(format!("{}", idcode), "0x3BA00477 (ARM Ltd)");
+
     // Example IDCODE from an ECP5.
     let idcode = IDCODE(0x41111043);
-    assert!(idcode.manufacturer_name() == Some("Lattice Semi."));
-    assert!(format!("{}", idcode) == "0x41111043 (Lattice Semi.)");
+    assert_eq!(idcode.manufacturer_name(), Some("Lattice Semi."));
+    assert_eq!(idcode.try_to_ecp5(), Some(ECP5IDCODE::LFE5U_25));
+    assert_eq!(format!("{}", idcode), "0x41111043 ECP5 LFE5U-25");
 }
 
 /// Stores information about a JTAG scan chain,
 /// including detected IDCODEs and IR lengths.
 pub struct JTAGChain {
     idcodes: Vec<Option<IDCODE>>,
-    irlen: Vec<usize>,
+    irlens: Vec<usize>,
+}
+
+impl JTAGChain {
+    pub fn new(idcodes: &[Option<IDCODE>], irlens: &[usize]) -> Self {
+        JTAGChain { idcodes: idcodes.to_vec(), irlens: irlens.to_vec() }
+    }
+
+    /// Return the number of TAPs in the chain.
+    pub fn n_taps(&self) -> usize {
+        self.idcodes.len()
+    }
+
+    /// Return the detected IDCODEs.
+    /// The returned slice has one entry per TAP;
+    /// TAPs which were in BYPASS are represented by None
+    /// while those that output an IDCODE are represented
+    /// by Some(IDCODE).
+    pub fn idcodes(&self) -> &[Option<IDCODE>] {
+        &self.idcodes
+    }
+
+    /// Return the IR lengths for each TAP.
+    pub fn irlens(&self) -> &[usize] {
+        &self.irlens
+    }
+
+    /// Format each TAP into a String suitable for display.
+    pub fn to_lines(&self) -> Vec<String> {
+        self.idcodes().iter().zip(self.irlens()).enumerate().map(|(idx, (idcode, irlen))| {
+            match idcode {
+                Some(idcode) => format!("{}: {} [IR length: {}]", idx, idcode, irlen),
+                None         => format!("{}: [Bypass, IR length: {}]", idx, irlen),
+            }
+        }).collect()
+    }
+
+    /// Check whether the provided TAP index is an ECP5.
+    pub fn check_idx(&self, index: usize) -> bool {
+        match self.idcodes().iter().nth(index) {
+            Some(tap) => match tap {
+                Some(idcode) => idcode.try_to_ecp5().is_some(),
+                None => false,
+            },
+            None => false,
+        }
+    }
+
+    /// If possible, return the unique TAP index for an ECP5
+    /// device in this chain.
+    pub fn auto_idx(&self) -> Option<usize> {
+        let ecp5_idxs: Vec<usize> = self.idcodes()
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(idx, id)| id.map(|id| (idx, id)))
+                                        .filter_map(|(idx, id)| id.try_to_ecp5().map(|_| idx))
+                                        .collect();
+        let len = ecp5_idxs.len();
+        if len == 0 {
+            log::info!("No ECP5 found in JTAG chain");
+            None
+        } else if len > 1 {
+            log::info!("Multiple ECP5 devices found in JTAG chain, specify one using --tap");
+            None
+        } else {
+            let index = ecp5_idxs.first().unwrap();
+            log::debug!("Automatically selecting ECP5 at TAP {}", index);
+            Some(*index)
+        }
+    }
+}
+
+/// Represents a single TAP in a JTAG scan chain,
+/// with methods to read and write this TAP while
+/// other TAPs are placed into BYPASS.
+pub struct JTAGTAP {
+    jtag: JTAG,
+    chain: JTAGChain,
+    index: usize,
+}
+
+impl JTAGTAP {
+    pub fn new(jtag: JTAG, chain: JTAGChain, index: usize) -> Self {
+        JTAGTAP { jtag, chain, index }
+    }
 }
 
 /// Extract all IDCODEs from a test-logic-reset DR chain `dr`.
@@ -565,7 +679,7 @@ fn test_extract_idcode() {
 /// /software/glasgow/applet/interface/jtag_probe/__init__.py#L712
 ///
 /// Returns Vec<usize>, with an entry for each TAP.
-fn extract_ir_lens(ir: &[bool], n_taps: usize, expected: Option<&[usize]>)
+fn extract_ir_lengths(ir: &[bool], n_taps: usize, expected: Option<&[usize]>)
     -> Result<Vec<usize>>
 {
     // Find all `10` patterns which indicate potential IR start positions.
@@ -610,7 +724,7 @@ fn extract_ir_lens(ir: &[bool], n_taps: usize, expected: Option<&[usize]>)
                 Err(Error::InvalidIR)
             } else {
                 log::debug!("Verified provided IR lengths against IR scan");
-                Ok(exp_starts)
+                Ok(starts_to_lens(&exp_starts, ir.len()))
             }
         }
     } else if n_taps == 1 {
@@ -618,8 +732,9 @@ fn extract_ir_lens(ir: &[bool], n_taps: usize, expected: Option<&[usize]>)
         log::info!("Only one TAP detected, IR length {}", ir.len());
         Ok(vec![ir.len()])
     } else if n_taps == starts.len() {
-        // Likewise if the number of possible starts matches the number of TAPs.
-        let irlens = starts.windows(2).map(|w| w[1] - w[0]).collect();
+        // If the number of possible starts matches the number of TAPs,
+        // we can unambiguously find all lengths.
+        let irlens = starts_to_lens(&starts, ir.len());
         log::info!("IR lengths are unambiguous: {:?}", irlens);
         Ok(irlens)
     } else {
@@ -628,13 +743,62 @@ fn extract_ir_lens(ir: &[bool], n_taps: usize, expected: Option<&[usize]>)
     }
 }
 
+#[test]
+fn test_extract_ir_lengths() {
+    // Passing case for error baseline with just one TAP
+    assert!(extract_ir_lengths(bv![1, 0, 0, 0, 0, 0], 1, None).is_ok());
+    // Error when n_taps is 0 instead
+    assert!(extract_ir_lengths(bv![0, 0, 0, 0, 0, 0], 0, None).is_err());
+    // Error when not enough start patterns for n_taps
+    assert!(extract_ir_lengths(bv![0, 0, 0, 0, 0, 0], 1, None).is_err());
+    assert!(extract_ir_lengths(bv![1, 0, 0, 0, 0, 0], 2, None).is_err());
+    // Error when chain does not begin with a start pattern
+    assert!(extract_ir_lengths(bv![0, 1, 0, 0, 0, 0], 1, None).is_err());
+    // Passing case with provided lengths
+    assert!(extract_ir_lengths(bv![1, 0, 0, 0, 1, 0], 2, Some(&[4, 2])).is_ok());
+    // Error if number of lengths doesn't match number of TAPs
+    assert!(extract_ir_lengths(bv![1, 0, 0, 0, 1, 0], 3, Some(&[4, 2])).is_err());
+    // Error if sum of lengths doesn't match scan length
+    assert!(extract_ir_lengths(bv![1, 0, 0, 0, 1, 0, 0], 2, Some(&[4, 2])).is_err());
+    // Error if provided lengths don't match the IR data
+    assert!(extract_ir_lengths(bv![1, 0, 0, 0, 1, 0], 2, Some(&[3, 3])).is_err());
+    // Error if start patterns are ambiguous
+    assert!(extract_ir_lengths(bv![1, 0, 1, 0, 1, 0], 2, None).is_err());
+
+    // Extract length for one TAP
+    assert_eq!(extract_ir_lengths(bv![1, 0, 0, 0, 0, 0], 1, None).unwrap(), vec![6]);
+    // Extract lengths for two unambiguous TAPs
+    assert_eq!(extract_ir_lengths(bv![1, 0, 0, 0, 1, 0], 2, None).unwrap(), vec![4, 2]);
+    // Extract lengths for three unambiguous TAPs
+    assert_eq!(extract_ir_lengths(bv![1, 0, 1, 0, 1, 0], 3, None).unwrap(), vec![2, 2, 2]);
+    // Validate provided lengths
+    assert_eq!(extract_ir_lengths(bv![1, 0, 1, 0, 1, 0], 3, Some(&[2, 2, 2])).unwrap(),
+               vec![2, 2, 2]);
+}
+
+/// Convert a list of start positions to a list of lengths.
+fn starts_to_lens(starts: &[usize], total: usize) -> Vec<usize> {
+    let mut lens: Vec<usize> = starts.windows(2)
+                                     .map(|w| w[1] - w[0])
+                                     .collect();
+    lens.push(total - lens.iter().sum::<usize>());
+    lens
+}
+
+#[test]
+fn test_starts_to_lens() {
+    assert_eq!(starts_to_lens(&[0],       6), vec![6]);
+    assert_eq!(starts_to_lens(&[0, 3],    6), vec![3, 3]);
+    assert_eq!(starts_to_lens(&[0, 2, 4], 6), vec![2, 2, 2]);
+}
+
 /// Represents a series of JTAG sequences to be sent to a DAP.
 /// The maximum number of sequences is limited by the DAP packet size, or at most 255.
 #[derive(Clone)]
 pub struct Sequences<'a> {
     dap: Option<&'a DAP>,
     num_sequences: usize,
-    capture_length: usize,
+    capture_lengths: Vec<usize>,
     request: Vec<u8>,
 }
 
@@ -643,13 +807,13 @@ impl<'a> Sequences<'a> {
     /// Only used by unit tests.
     #[cfg(test)]
     fn new() -> Self {
-        Sequences { dap: None, num_sequences: 0, capture_length: 0, request: Vec::new() }
+        Sequences { dap: None, num_sequences: 0, capture_lengths: Vec::new(), request: Vec::new() }
     }
 
     /// Create a new Sequences object which can be sent to the provided DAP.
     pub fn with_dap(dap: &'a DAP) -> Self {
         Sequences {
-            dap: Some(dap), num_sequences: 0, capture_length: 0, request: Vec::new()
+            dap: Some(dap), num_sequences: 0, capture_lengths: Vec::new(), request: Vec::new()
         }
     }
 
@@ -705,7 +869,7 @@ impl<'a> Sequences<'a> {
         }
         if capture {
             info |= 1 << 7;
-            self.capture_length += len;
+            self.capture_lengths.push(len);
         }
 
         // Write info and TDI data to request.
@@ -828,12 +992,23 @@ impl<'a> Sequences<'a> {
         if let Some(dap) = self.dap {
             let request = self.to_bytes();
             let result = dap.jtag_sequence(&request[..])?;
-            let expected = (self.capture_length + 7)/8;
-            if result.len() != expected {
-                log::error!("Expected {} bytes from probe, but got {}", expected, result.len());
+            let expected_n_bytes = self.capture_lengths.iter().map(|l| (l+7)/8).sum::<usize>();
+            if result.len() != expected_n_bytes {
+                log::error!("Expected {} bytes from probe, but got {}",
+                            expected_n_bytes, result.len());
                 Err(Error::UnexpectedJTAGLength)
             } else {
-                Ok(bytes_to_bits(&result, self.capture_length)?)
+                // The probe responds with byte-padded bits per request,
+                // e.g., with three one-cycle request, three bytes are
+                // returned, with one bit (the LSbit) set per byte.
+                // We combine those back into a single Vec of bits.
+                let mut bits = Vec::new();
+                let mut bytes = &result[..];
+                for l in self.capture_lengths.iter() {
+                    bits.append(&mut bytes_to_bits(bytes, *l)?);
+                    bytes = &bytes[(l+7)/8..];
+                }
+                Ok(bits)
             }
         } else {
             Err(Error::NoDAPProvided)

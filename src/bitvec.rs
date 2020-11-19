@@ -2,9 +2,9 @@
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Not enough bits to extract required data")]
+    #[error("Not enough bits to extract required data.")]
     NotEnoughBits,
-    #[error("Unknown word size")]
+    #[error("Unknown word size.")]
     InvalidWordSize,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
