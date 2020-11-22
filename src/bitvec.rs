@@ -49,6 +49,14 @@ pub fn bytes_to_bits(bytes: &[u8], mut n: usize) -> Result<Vec<bool>> {
     Err(Error::NotEnoughBits)
 }
 
+/// Convert a single byte to a Vec of bool.
+pub fn byte_to_bits(byte: u8) -> Vec<bool> {
+    match bytes_to_bits(&[byte], 8) {
+        Ok(bits) => bits,
+        _ => unreachable!(),
+    }
+}
+
 /// Extracts the next n bits as a u64, least significant bit first,
 /// with any higher order bits set to 0. Returns the extracted word
 /// and any remaining bits.

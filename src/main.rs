@@ -1,5 +1,5 @@
-//use std::fs::File;
-//use std::io::prelude::*;
+use std::fs::File;
+use std::io::prelude::*;
 use std::time::{Instant, Duration};
 use clap::{Arg, App, AppSettings, SubCommand};
 use clap::{value_t, values_t, crate_description, crate_version};
@@ -8,7 +8,7 @@ use anyhow::bail;
 use ecpdap::probe::{Probe, ProbeInfo};
 use ecpdap::dap::DAP;
 use ecpdap::jtag::{JTAG, JTAGChain};
-//use ecpdap::ecp5::ECP5;
+use ecpdap::ecp5::ECP5;
 
 #[allow(clippy::cognitive_complexity)]
 fn main() -> anyhow::Result<()> {
@@ -199,20 +199,20 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Create a TAP instance, consuming the JTAG instance.
-    let tap = jtag.to_tap(chain, tap_idx);
+    let tap = jtag.to_tap(chain, tap_idx)?;
+
+    // Create an ECP5 instance from the TAP.
+    let mut ecp5 = ECP5::new(tap);
 
     // We can finally handle 'program' and 'flash' commands.
     match matches.subcommand_name() {
         Some("program") => {
-            /*
-            let ecp5 = ECP5::new(&jtag)?;
             let matches = matches.subcommand_matches("program").unwrap();
             let path = matches.value_of("file").unwrap();
             let mut file = File::open(path)?;
             let mut data = Vec::new();
             file.read_to_end(&mut data)?;
             ecp5.program(&data)?;
-            */
         },
         Some("flash") => {
             /*
