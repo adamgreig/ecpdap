@@ -134,6 +134,7 @@ impl JTAG {
             TAPState::Exit1DR  | TAPState::Exit1IR  => self.mode(bv![1, 0])?,
             TAPState::PauseDR  | TAPState::PauseIR  => self.mode(bv![1, 1, 0])?,
             TAPState::UpdateDR | TAPState::UpdateIR => self.mode(bv![0])?,
+            TAPState::ShiftDR  | TAPState::ShiftIR  => self.mode(bv![1, 1, 0])?,
             _                                       => return Err(Error::BadState),
         };
         self.state = TAPState::RunTestIdle;
@@ -197,6 +198,7 @@ impl JTAG {
             TAPState::TestLogicReset                => self.mode(bv![0, 1, 1, 0, 0])?,
             TAPState::RunTestIdle                   => self.mode(bv![1, 1, 0, 0])?,
             TAPState::Exit1IR                       => self.mode(bv![0, 1, 0])?,
+            TAPState::Exit1DR                       => self.mode(bv![1, 1, 1, 0, 0])?,
             TAPState::PauseIR                       => self.mode(bv![1, 0])?,
             TAPState::PauseDR                       => self.mode(bv![1, 1, 1, 1, 0, 0])?,
             TAPState::UpdateIR | TAPState::UpdateDR => self.mode(bv![1, 1, 0, 0])?,
@@ -236,6 +238,7 @@ impl JTAG {
         log::debug!("Writing to IR: {:02X?}", bits_to_bytes(tdi));
         self.enter_shift_ir()?;
         self.write(tdi, true)?;
+        self.enter_update_ir()?;
         Ok(())
     }
 
@@ -246,6 +249,7 @@ impl JTAG {
         self.enter_shift_ir()?;
         let tdo = self.read(n, true)?;
         log::trace!("Read from IR: {:02X?}", bits_to_bytes(&tdo));
+        self.enter_update_ir()?;
         Ok(tdo)
     }
 
@@ -256,36 +260,37 @@ impl JTAG {
         self.enter_shift_ir()?;
         let tdo = self.exchange(tdi, true)?;
         log::trace!("Exchanged from IR: {:02X?}", bits_to_bytes(&tdo));
+        self.enter_update_ir()?;
         Ok(tdo)
     }
 
-    /// Move to Shift-DR, write `tdi` to DR, then either enter Update-DR
-    /// if `update` is true, otherwise enter Exit1-DR.
-    pub fn write_dr(&mut self, tdi: &[bool], update: bool) -> Result<()> {
+    /// Move to Shift-DR, write `tdi` to DR.
+    pub fn write_dr(&mut self, tdi: &[bool]) -> Result<()> {
         log::debug!("Writing to DR: {:?}", bits_to_bytes(tdi));
         self.enter_shift_dr()?;
-        self.write(tdi, update)?;
+        self.write(tdi, true)?;
+        self.enter_update_dr()?;
         Ok(())
     }
 
-    /// Move to Shift-DR, read `n` bits of DR while writing 0xFF, then either enter Update-DR
-    /// if `update` is true, otherwise enter Exit1-DR.
+    /// Move to Shift-DR, read `n` bits of DR while writing 0xFF.
     /// Returns the captured bits from TDO.
-    pub fn read_dr(&mut self, n: usize, update: bool) -> Result<Vec<bool>> {
+    pub fn read_dr(&mut self, n: usize) -> Result<Vec<bool>> {
         log::debug!("Reading from DR...");
         self.enter_shift_dr()?;
-        let tdo = self.read(n, update)?;
+        let tdo = self.read(n, true)?;
+        self.enter_update_dr()?;
         log::trace!("Read from DR: {:?}", bits_to_bytes(&tdo));
         Ok(tdo)
     }
 
-    /// Move to Shift-DR, write `tdi` to DR while capturing TDO, then either enter Update-DR
-    /// if `update` is true, otherwise enter Exit1-DR.
+    /// Move to Shift-DR, write `tdi` to DR while capturing TDO.
     /// Returns the captured bits from TDO.
-    pub fn exchange_dr(&mut self, tdi: &[bool], update: bool) -> Result<Vec<bool>> {
+    pub fn exchange_dr(&mut self, tdi: &[bool]) -> Result<Vec<bool>> {
         log::debug!("Exchanging with DR: {:?}", bits_to_bytes(tdi));
         self.enter_shift_dr()?;
-        let tdo = self.exchange(tdi, update)?;
+        let tdo = self.exchange(tdi, true)?;
+        self.enter_update_dr()?;
         log::trace!("Exchanged from DR: {:?}", bits_to_bytes(&tdo));
         Ok(tdo)
     }
@@ -308,72 +313,57 @@ impl JTAG {
     }
 
     /// Shortcut for reading `n` bits from the current register.
-    /// If `update` is true, exit into the relevant Update state,
-    /// otherwise exit to Exit1.
+    /// If `exit` is true, exit to Exit1, otherwise remain in Shift state.
     ///
     /// Must already be in a Shift* state, and `self.state` is updated upon completion.
-    fn read(&mut self, n: usize, update: bool) -> Result<Vec<bool>> {
-        let new_state = match (self.state, update) {
-            (TAPState::ShiftIR, true) => TAPState::UpdateIR,
-            (TAPState::ShiftIR, false) => TAPState::Exit1IR,
-            (TAPState::ShiftDR, true) => TAPState::UpdateDR,
-            (TAPState::ShiftDR, false) => TAPState::Exit1DR,
+    fn read(&mut self, n: usize, exit: bool) -> Result<Vec<bool>> {
+        let new_state = match (self.state, exit) {
+            (TAPState::ShiftIR, true) => TAPState::Exit1IR,
+            (TAPState::ShiftIR, false) => TAPState::ShiftIR,
+            (TAPState::ShiftDR, true) => TAPState::Exit1DR,
+            (TAPState::ShiftDR, false) => TAPState::ShiftDR,
             _ => return Err(Error::BadState),
         };
         log::trace!("JTAG state: {:?} -> {:?}, reading {} bits", self.state, new_state, n);
 
-        let mut seq = self.sequences().read(n, true)?;
-        if update {
-            seq = seq.mode(bv![1])?;
-        }
-        let result = seq.run()?;
+        let tdo = self.sequences().read(n, exit)?.run()?;
 
         self.state = new_state;
-        Ok(result)
+        Ok(tdo)
     }
 
     /// Shortcut for writing `tdi` bits to the current register.
-    /// If `update` is true, exit into the relevant Update state,
-    /// otherwise exit to Exit1.
+    /// If `exit` is true, exit to Exit1, otherwise remain in Shift state.
     ///
     /// Must already be in a Shift* state, and `self.state` is updated upon completion.
-    fn write(&mut self, tdi: &[bool], update: bool) -> Result<()> {
-        let new_state = match (self.state, update) {
-            (TAPState::ShiftIR, true) => TAPState::UpdateIR,
-            (TAPState::ShiftIR, false) => TAPState::Exit1IR,
-            (TAPState::ShiftDR, true) => TAPState::UpdateDR,
-            (TAPState::ShiftDR, false) => TAPState::Exit1DR,
+    fn write(&mut self, tdi: &[bool], exit: bool) -> Result<()> {
+        let new_state = match (self.state, exit) {
+            (TAPState::ShiftIR, true) => TAPState::Exit1IR,
+            (TAPState::ShiftIR, false) => TAPState::ShiftIR,
+            (TAPState::ShiftDR, true) => TAPState::Exit1DR,
+            (TAPState::ShiftDR, false) => TAPState::ShiftDR,
             _ => return Err(Error::BadState),
         };
         log::trace!("JTAG state: {:?} -> {:?}, writing {} bits", self.state, new_state, tdi.len());
-        let mut seq = self.sequences().write(tdi, true)?;
-        if update {
-            seq = seq.mode(bv![1])?;
-        }
-        seq.run()?;
+        self.sequences().write(tdi, exit)?.run()?;
         self.state = new_state;
         Ok(())
     }
 
     /// Shortcut for exchanging `tdi` bits with the current register.
-    /// If `update` is true, exit into the relevant Update state,
-    /// otherwise exit to Exit1.
+    /// If `exit` is true, exit to Exit1, otherwise remain in Shift state.
     ///
     /// Must already be in a Shift* state, and `self.state` is updated upon completion.
-    fn exchange(&mut self, tdi: &[bool], update: bool) -> Result<Vec<bool>> {
-        let new_state = match (self.state, update) {
-            (TAPState::ShiftIR, true) => TAPState::UpdateIR,
-            (TAPState::ShiftIR, false) => TAPState::Exit1IR,
-            (TAPState::ShiftDR, true) => TAPState::UpdateDR,
-            (TAPState::ShiftDR, false) => TAPState::Exit1DR,
+    fn exchange(&mut self, tdi: &[bool], exit: bool) -> Result<Vec<bool>> {
+        let new_state = match (self.state, exit) {
+            (TAPState::ShiftIR, true) => TAPState::Exit1IR,
+            (TAPState::ShiftIR, false) => TAPState::ShiftIR,
+            (TAPState::ShiftDR, true) => TAPState::Exit1DR,
+            (TAPState::ShiftDR, false) => TAPState::ShiftDR,
             _ => return Err(Error::BadState),
         };
         log::trace!("JTAG state: {:?} -> {:?}, writing {} bits", self.state, new_state, tdi.len());
-        let mut seq = self.sequences().exchange(tdi, true)?;
-        if update {
-            seq = seq.mode(bv![1])?;
-        }
-        let tdo = seq.run()?;
+        let tdo = self.sequences().exchange(tdi, exit)?.run()?;
         self.state = new_state;
         Ok(tdo)
     }
@@ -707,34 +697,34 @@ impl JTAGTAP {
         Ok(tdo)
     }
 
-    /// Move to Shift-DR, write `dr` to DR, then enter either Update-DR or Exit1-DR.
-    pub fn write_dr(&mut self, dr: &[bool], update: bool) -> Result<()> {
+    /// Move to Shift-DR, write `dr` to DR.
+    pub fn write_dr(&mut self, dr: &[bool]) -> Result<()> {
         // Add dummy bits before and after our IR as required.
         let mut tdi = vec![true; self.dr_prefix];
         tdi.extend_from_slice(dr);
         tdi.extend_from_slice(&vec![true; self.dr_suffix]);
 
-        self.jtag.write_dr(&tdi, update)?;
+        self.jtag.write_dr(&tdi)?;
         Ok(())
     }
 
-    /// Move to Shift-DR, read `n` bits of DR while writing 0xFF, then enter Update-DR.
+    /// Move to Shift-DR, read `n` bits of DR while writing 0xFF.
     /// Returns the captured bits from TDO.
-    pub fn read_dr(&mut self, n: usize, capture: bool) -> Result<Vec<bool>> {
-        let tdo = self.jtag.read_dr(self.dr_prefix + n + self.dr_suffix, capture)?;
+    pub fn read_dr(&mut self, n: usize) -> Result<Vec<bool>> {
+        let tdo = self.jtag.read_dr(self.dr_prefix + n + self.dr_suffix)?;
         let tdo = tdo[self.dr_prefix..self.dr_prefix+n].to_vec();
         Ok(tdo)
     }
 
-    /// Move to Shift-DR, write `dr` to DR while capturing TDO, then enter Update-DR.
+    /// Move to Shift-DR, write `dr` to DR while capturing TDO.
     /// Returns the captured bits from TDO.
-    pub fn exchange_dr(&mut self, dr: &[bool], capture: bool) -> Result<Vec<bool>> {
+    pub fn exchange_dr(&mut self, dr: &[bool]) -> Result<Vec<bool>> {
         // Add dummy bits before and after our IR as required.
         let mut tdi = vec![true; self.dr_prefix];
         tdi.extend_from_slice(dr);
         tdi.extend_from_slice(&vec![true; self.dr_suffix]);
 
-        let tdo = self.jtag.exchange_dr(&tdi, capture)?;
+        let tdo = self.jtag.exchange_dr(&tdi)?;
         let tdo = tdo[self.dr_prefix..self.dr_prefix+dr.len()].to_vec();
         Ok(tdo)
     }
@@ -952,6 +942,13 @@ impl DAPSequences {
         }
     }
 
+    /// Check if a new sequence of `len` clock cycles
+    /// could fit in the current DAPSequence packet.
+    pub fn can_fit_sequence(&self, len: usize) -> bool {
+        let nbytes = (len + 7) / 8;
+        2 + self.request.len() + 1 + nbytes <= self.max_packet
+    }
+
     /// Add a new sequence to this set of sequences.
     ///
     /// len: number of clock cycles, from 1 to 64.
@@ -1059,12 +1056,12 @@ impl<'a> Sequences<'a> {
     /// Defaults to a 64-byte maximum packet size.
     #[cfg(test)]
     fn new() -> Self {
-        Sequences { dap: None, sequences: vec![DAPSequences::new(64)] }
+        Sequences { dap: None, sequences: Vec::new() }
     }
 
     /// Create a new Sequences object which can be sent to the provided DAP.
     pub fn with_dap(dap: &'a DAP) -> Self {
-        Sequences { dap: Some(dap), sequences: vec![DAPSequences::new(dap.packet_size())] }
+        Sequences { dap: Some(dap), sequences: Vec::new() }
     }
 
     /// Add a new sequence to this set of sequences.
@@ -1077,20 +1074,8 @@ impl<'a> Sequences<'a> {
     pub fn add_sequence(&mut self, len: usize, tms: bool, tdi: Option<&[bool]>, capture: bool)
         -> Result<()>
     {
-        let sequences = self.sequences.last_mut().expect("Internal error");
-        match sequences.add_sequence(len, tms, tdi, capture) {
-            Err(Error::TooManySequences) => {
-                // Add a new DAPSequences packet and try again.
-                let packet_size = match self.dap {
-                    Some(dap) => dap.packet_size(),
-                    None => 64,
-                };
-                self.sequences.push(DAPSequences::new(packet_size));
-                self.add_sequence(len, tms, tdi, capture)
-            },
-            Ok(()) => Ok(()),
-            Err(e) => Err(e),
-        }
+        let sequences = self.sequences_for_len(len);
+        sequences.add_sequence(len, tms, tdi, capture)
     }
 
     /// Add multiple sequences as required to reach the desired total bit length.
@@ -1121,6 +1106,25 @@ impl<'a> Sequences<'a> {
             idx += 64;
         }
         Ok(())
+    }
+
+    /// Returns the DAPSequences to use for a new request of length `len`,
+    /// creating it if necessary.
+    fn sequences_for_len(&mut self, len: usize) -> &mut DAPSequences {
+        let packet_size = match self.dap {
+            Some(dap) => dap.packet_size(),
+            None => 64,
+        };
+
+        if let Some(sequences) = self.sequences.last_mut() {
+            if !sequences.can_fit_sequence(len) {
+                self.sequences.push(DAPSequences::new(packet_size));
+            }
+        } else {
+            self.sequences.push(DAPSequences::new(packet_size));
+        }
+
+        self.sequences.last_mut().unwrap()
     }
 
     /// Shift out `tms` bits.
@@ -1247,7 +1251,7 @@ fn test_sequences_mode() {
     // No TMS bits generates no sequences.
     assert_eq!(
         Sequences::new().mode(bv![]).unwrap().to_bytes(),
-        vec![vec![0]]
+        Vec::<Vec<u8>>::new()
     );
 
     // One TMS bit generates one sequence with one clock.

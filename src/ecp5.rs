@@ -8,6 +8,8 @@ use crate::bitvec::{byte_to_bits, bytes_to_bits, drain_u32, Error as BitvecError
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    #[error("ECP5 status register in incorrect state.")]
+    BadStatus,
     #[error("JTAG error")]
     JTAG(#[from] JTAGError),
     #[error("Bitvec error")]
@@ -129,9 +131,10 @@ pub enum BSEError {
 pub enum ConfigTarget {
     SRAM = 0,
     eFuse = 1,
-    Unknown = 0xFF,
+    Unknown = 0xF,
 }
 
+/// ECP5 Status register.
 #[derive(Copy, Clone)]
 pub struct Status(u32);
 
@@ -140,9 +143,28 @@ impl Status {
         Self(word)
     }
 
-    pub fn transparent(&self) -> bool {
-        (self.0 & 1) == 1
-    }
+    pub fn transparent(&self) -> bool       { self.bit(0) }
+    pub fn jtag_active(&self) -> bool       { self.bit(4) }
+    pub fn pwd_protection(&self) -> bool    { self.bit(5) }
+    pub fn decrypt_enable(&self) -> bool    { self.bit(7) }
+    pub fn done(&self) -> bool              { self.bit(8) }
+    pub fn isc_enable(&self) -> bool        { self.bit(9) }
+    pub fn write_enable(&self) -> bool      { self.bit(10) }
+    pub fn read_enable(&self) -> bool       { self.bit(11) }
+    pub fn busy(&self) -> bool              { self.bit(12) }
+    pub fn fail(&self) -> bool              { self.bit(13) }
+    pub fn feature_otp(&self) -> bool       { self.bit(14) }
+    pub fn decrypt_only(&self) -> bool      { self.bit(15) }
+    pub fn pwd_enable(&self) -> bool        { self.bit(16) }
+    pub fn encrypt_preamble(&self) -> bool  { self.bit(20) }
+    pub fn standard_preamble(&self) -> bool { self.bit(21) }
+    pub fn spim_fail(&self) -> bool         { self.bit(22) }
+    pub fn execution_error(&self) -> bool   { self.bit(26) }
+    pub fn id_error(&self) -> bool          { self.bit(27) }
+    pub fn invalid_command(&self) -> bool   { self.bit(28) }
+    pub fn sed_error(&self) -> bool         { self.bit(29) }
+    pub fn bypass_mode(&self) -> bool       { self.bit(30) }
+    pub fn flow_through_mode(&self) -> bool { self.bit(31) }
 
     pub fn config_target(&self) -> ConfigTarget {
         match (self.0 >> 1) & 0b111 {
@@ -152,92 +174,12 @@ impl Status {
         }
     }
 
-    pub fn jtag_active(&self) -> bool {
-        ((self.0 >> 4) & 1) == 1
-    }
-
-    pub fn pwd_protection(&self) -> bool {
-        ((self.0 >> 5) & 1) == 1
-    }
-
-    pub fn decrypt_enable(&self) -> bool {
-        ((self.0 >> 7) & 1) == 1
-    }
-
-    pub fn done(&self) -> bool {
-        ((self.0 >> 8) & 1) == 1
-    }
-
-    pub fn isc_enable(&self) -> bool {
-        ((self.0 >> 9) & 1) == 1
-    }
-
-    pub fn write_enable(&self) -> bool {
-        ((self.0 >> 10) & 1) == 1
-    }
-
-    pub fn read_enable(&self) -> bool {
-        ((self.0 >> 11) & 1) == 1
-    }
-
-    pub fn busy(&self) -> bool {
-        ((self.0 >> 12) & 1) == 1
-    }
-
-    pub fn fail(&self) -> bool {
-        ((self.0 >> 13) & 1) == 1
-    }
-
-    pub fn feature_otp(&self) -> bool {
-        ((self.0 >> 14) & 1) == 1
-    }
-
-    pub fn decrypt_only(&self) -> bool {
-        ((self.0 >> 15) & 1) == 1
-    }
-
-    pub fn pwd_enable(&self) -> bool {
-        ((self.0 >> 16) & 1) == 1
-    }
-
-    pub fn encrypt_preamble(&self) -> bool {
-        ((self.0 >> 20) & 1) == 1
-    }
-
-    pub fn standard_preamble(&self) -> bool {
-        ((self.0 >> 21) & 1) == 1
-    }
-
-    pub fn spi_m_fail_1(&self) -> bool {
-        ((self.0 >> 22) & 1) == 1
-    }
-
     pub fn bse_error(&self) -> BSEError {
         BSEError::from(((self.0 >> 23) & 0b111) as u8)
     }
 
-    pub fn execution_error(&self) -> bool {
-        ((self.0 >> 26) & 1) == 1
-    }
-
-    pub fn id_error(&self) -> bool {
-        ((self.0 >> 27) & 1) == 1
-    }
-
-    pub fn invalid_command(&self) -> bool {
-        ((self.0 >> 28) & 1) == 1
-    }
-
-    pub fn sed_error(&self) -> bool {
-        ((self.0 >> 29) & 1) == 1
-    }
-
-    pub fn bypass_mode(&self) -> bool {
-        ((self.0 >> 30) & 1) == 1
-    }
-
-    pub fn flow_through_mode(&self) -> bool {
-        ((self.0 >> 31) & 1) == 1
+    fn bit(&self, offset: usize) -> bool {
+        (self.0 >> offset) & 1 == 1
     }
 }
 
@@ -245,36 +187,36 @@ impl fmt::Debug for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!(
             "ECP5 Status: {:08X}
-              Transparent: {}
-              Config target: {:?}
-              JTAG active: {}
-              PWD protection: {}
-              Decrypt enable: {}
-              DONE: {}
-              ISC enable: {}
-              Write enable: {}
-              Read enable: {}
-              Busy: {}
-              Fail: {}
-              Feature OTP: {}
-              Decrypt only: {}
-              PWD enable: {}
-              Encrypt preamble: {}
-              Standard preamble: {}
-              SPIm fail 1: {}
-              BSE error: {:?}
-              Execution error: {}
-              ID error: {}
-              Invalid command: {}
-              SED error: {}
-              Bypass mode: {}
-              Flow-through mode: {}",
+             Transparent: {}
+             Config target: {:?}
+             JTAG active: {}
+             PWD protection: {}
+             Decrypt enable: {}
+             DONE: {}
+             ISC enable: {}
+             Write enable: {}
+             Read enable: {}
+             Busy: {}
+             Fail: {}
+             Feature OTP: {}
+             Decrypt only: {}
+             PWD enable: {}
+             Encrypt preamble: {}
+             Standard preamble: {}
+             SPIm fail 1: {}
+             BSE error: {:?}
+             Execution error: {}
+             ID error: {}
+             Invalid command: {}
+             SED error: {}
+             Bypass mode: {}
+             Flow-through mode: {}",
             self.0, self.transparent(), self.config_target(),
             self.jtag_active(), self.pwd_protection(), self.decrypt_enable(),
             self.done(), self.isc_enable(), self.write_enable(),
             self.read_enable(), self.busy(), self.fail(), self.feature_otp(),
             self.decrypt_only(), self.pwd_enable(), self.encrypt_preamble(),
-            self.standard_preamble(), self.spi_m_fail_1(), self.bse_error(),
+            self.standard_preamble(), self.spim_fail(), self.bse_error(),
             self.execution_error(), self.id_error(), self.invalid_command(),
             self.sed_error(), self.bypass_mode(), self.flow_through_mode()))
     }
@@ -290,9 +232,11 @@ impl ECP5 {
         ECP5 { tap }
     }
 
+    /// Read current status register content.
     pub fn status(&mut self) -> Result<Status> {
+        log::trace!("Reading status register");
         self.command(Command::LSC_READ_STATUS)?;
-        let data = self.tap.read_dr(32, true)?;
+        let data = self.tap.read_dr(32)?;
         let (status, _) = drain_u32(&data)?;
         Ok(Status::new(status))
     }
@@ -301,40 +245,94 @@ impl ECP5 {
     ///
     /// The ECP5 will be reset and start configuration after programming completion.
     pub fn program(&mut self, data: &[u8]) -> Result<()> {
-        self.status()?;
-
-        // Enable configuration
+        // Enable configuration interface.
         self.command(Command::ISC_ENABLE)?;
         self.tap.run_test_idle(50)?;
 
-        let status = self.status()?;
-        println!("Cfg starting, {:?}", status);
+        self.check_ready_to_program()?;
 
         self.command(Command::LSC_BITSTREAM_BURST)?;
 
-        // Load in entire bitstream
-        for group in data.chunks(55) {
-            for chunk in group.chunks(6) {
-                let data: Vec<u8> = chunk.iter().map(|x| x.reverse_bits()).collect();
-                let bits = bytes_to_bits(&data, data.len() * 8)?;
-                self.tap.write_dr(&bits, false)?;
-            }
-        }
+        // Load in entire bitstream.
+        // We have to bit-reverse each byte of bitstream for the ECP5.
+        let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
+        let bits = bytes_to_bits(&data, data.len() * 8)?;
+        self.tap.write_dr(&bits)?;
 
-        // Enter Update-DR and return to Run-Test/Idle
-        self.tap.run_test_idle(0)?;
+        // Return to Run-Test/Idle to complete programming.
+        self.tap.run_test_idle(1)?;
 
-        // Disable configuration
+        // Disable configuration interface.
         self.command(Command::ISC_DISABLE)?;
         self.tap.run_test_idle(50)?;
 
-        let status = self.status()?;
-        println!("Cfg done, {:?}", status);
+        self.check_programmed_ok()?;
 
         Ok(())
     }
 
+    /// Reads current status and checks it seems suitable for SRAM programming.
+    fn check_ready_to_program(&mut self) -> Result<()> {
+        let status = self.status()?;
+        log::debug!("Checking ECP5 status before programming ({:08X})", status.0);
+        match status.config_target() {
+            ConfigTarget::SRAM => (),
+            target => {
+                log::error!("Incorrect configuration target: {:?}", target);
+                return Err(Error::BadStatus);
+            }
+        }
+        match status.bse_error() {
+            BSEError::NoError => (),
+            error => {
+                log::error!("BSE error present: {:?}", error);
+                return Err(Error::BadStatus);
+            }
+        }
+        if !status.jtag_active() {
+            log::error!("JTAG reported as not active");
+            return Err(Error::BadStatus);
+        }
+        if !status.isc_enable() {
+            log::error!("ISC reported as not enabled");
+            return Err(Error::BadStatus);
+        }
+        if !status.write_enable() {
+            log::error!("Write-enable not set");
+            return Err(Error::BadStatus);
+        }
+        if status.busy() {
+            log::error!("BUSY flag currently set");
+            return Err(Error::BadStatus);
+        }
+        Ok(())
+    }
+
+    /// Reads current status and checks no errors reported after SRAM programming.
+    fn check_programmed_ok(&mut self) -> Result<()> {
+        let status = self.status()?;
+        log::debug!("Checking ECP5 status after programming ({:08X})", status.0);
+        match status.bse_error() {
+            BSEError::NoError => (),
+            error => {
+                log::error!("BSE error present: {:?}", error);
+                return Err(Error::BadStatus);
+            }
+        }
+        if !status.done() {
+            log::error!("DONE flag not set");
+            return Err(Error::BadStatus);
+        }
+        if status.fail() {
+            log::error!("FAIL flag set");
+            return Err(Error::BadStatus);
+        }
+        Ok(())
+    }
+
+    /// Load a command into the IR.
     fn command(&mut self, command: Command) -> Result<()> {
+        log::trace!("Loading ECP5 command {:?}", command);
         Ok(self.tap.write_ir(&command.bits())?)
     }
 }
