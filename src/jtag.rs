@@ -15,6 +15,8 @@ pub enum Error {
     UnexpectedJTAGLength,
     #[error("Internal error: invalid JTAG sequence.")]
     InvalidSequence,
+    #[error("Too many sequences for one DAP command.")]
+    TooManySequences,
     #[error("JTAG scan chain broken: check connection or try a larger --scan-chain-length.")]
     ScanChainBroken,
     #[error("Internal error: Tried to run sequences without providing a DAP.")]
@@ -931,28 +933,22 @@ fn test_starts_to_lens() {
     assert_eq!(starts_to_lens(&[0, 2, 4], 6), vec![2, 2, 2]);
 }
 
-/// Represents a series of JTAG sequences to be sent to a DAP.
-/// The maximum number of sequences is limited by the DAP packet size, or at most 255.
+/// Represents a single DAP command containing up to 255 JTAG sequences.
 #[derive(Clone)]
-pub struct Sequences<'a> {
-    dap: Option<&'a DAP>,
+struct DAPSequences {
     num_sequences: usize,
     capture_lengths: Vec<usize>,
     request: Vec<u8>,
+    max_packet: usize,
 }
 
-impl<'a> Sequences<'a> {
-    /// Create a new Sequences object without providing a DAP.
-    /// Only used by unit tests.
-    #[cfg(test)]
-    fn new() -> Self {
-        Sequences { dap: None, num_sequences: 0, capture_lengths: Vec::new(), request: Vec::new() }
-    }
-
-    /// Create a new Sequences object which can be sent to the provided DAP.
-    pub fn with_dap(dap: &'a DAP) -> Self {
-        Sequences {
-            dap: Some(dap), num_sequences: 0, capture_lengths: Vec::new(), request: Vec::new()
+impl DAPSequences {
+    pub fn new(max_packet: usize) -> Self {
+        DAPSequences {
+            num_sequences: 0,
+            capture_lengths: Vec::new(),
+            request: Vec::new(),
+            max_packet: max_packet,
         }
     }
 
@@ -988,11 +984,9 @@ impl<'a> Sequences<'a> {
         // + current request length
         // + 1 byte of info for this sequence
         // + length of this sequence's TDI data
-        if let Some(dap) = self.dap {
-            if 2 + self.request.len() + 1 + nbytes > dap.packet_size() {
-                log::error!("Request will cause sequence to exceed DAP packet size");
-                return Err(Error::InvalidSequence);
-            }
+        if 2 + self.request.len() + 1 + nbytes > self.max_packet {
+            log::error!("Request will cause sequence to exceed DAP packet size");
+            return Err(Error::TooManySequences);
         }
 
         // If supplied, convert input [bool] into [u8], otherwise use dummy 0xFF bytes.
@@ -1017,6 +1011,86 @@ impl<'a> Sequences<'a> {
         self.num_sequences += 1;
 
         Ok(())
+    }
+
+    /// Generate the bytes representing the DAP request packet for these sequences.
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut request = vec![self.num_sequences as u8];
+        request.extend_from_slice(&self.request[..]);
+        request
+    }
+
+    /// Run these sequences, returning all captured TDO bits.
+    pub fn run(self, dap: &DAP) -> Result<Vec<bool>> {
+        let request = self.to_bytes();
+        let result = dap.jtag_sequence(&request[..])?;
+        let expected_n_bytes = self.capture_lengths.iter().map(|l| (l+7)/8).sum::<usize>();
+        if result.len() != expected_n_bytes {
+            log::error!("Expected {} bytes from probe, but got {}",
+                        expected_n_bytes, result.len());
+            Err(Error::UnexpectedJTAGLength)
+        } else {
+            // The probe responds with byte-padded bits per request,
+            // e.g., with three one-cycle request, three bytes are
+            // returned, with one bit (the LSbit) set per byte.
+            // We combine those back into a single Vec of bits.
+            let mut bits = Vec::new();
+            let mut bytes = &result[..];
+            for l in self.capture_lengths.iter() {
+                bits.append(&mut bytes_to_bits(bytes, *l)?);
+                bytes = &bytes[(l+7)/8..];
+            }
+            Ok(bits)
+        }
+    }
+}
+
+/// Represents a series of JTAG sequences to be sent to a DAP.
+/// The maximum number of sequences is limited by the DAP packet size, or at most 255.
+#[derive(Clone)]
+pub struct Sequences<'a> {
+    dap: Option<&'a DAP>,
+    sequences: Vec<DAPSequences>,
+}
+
+impl<'a> Sequences<'a> {
+    /// Create a new Sequences object without providing a DAP.
+    /// Only used by unit tests.
+    /// Defaults to a 64-byte maximum packet size.
+    #[cfg(test)]
+    fn new() -> Self {
+        Sequences { dap: None, sequences: vec![DAPSequences::new(64)] }
+    }
+
+    /// Create a new Sequences object which can be sent to the provided DAP.
+    pub fn with_dap(dap: &'a DAP) -> Self {
+        Sequences { dap: Some(dap), sequences: vec![DAPSequences::new(dap.packet_size())] }
+    }
+
+    /// Add a new sequence to this set of sequences.
+    ///
+    /// len: number of clock cycles, from 1 to 64.
+    /// tms: value to set TMS during this sequence.
+    /// tdi: optional data to clock out TDI, bits in transmission order,
+    ///      set to all-1 if None.
+    /// capture: if true, capture TDO state during this sequence.
+    pub fn add_sequence(&mut self, len: usize, tms: bool, tdi: Option<&[bool]>, capture: bool)
+        -> Result<()>
+    {
+        let sequences = self.sequences.last_mut().expect("Internal error");
+        match sequences.add_sequence(len, tms, tdi, capture) {
+            Err(Error::TooManySequences) => {
+                // Add a new DAPSequences packet and try again.
+                let packet_size = match self.dap {
+                    Some(dap) => dap.packet_size(),
+                    None => 64,
+                };
+                self.sequences.push(DAPSequences::new(packet_size));
+                self.add_sequence(len, tms, tdi, capture)
+            },
+            Ok(()) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Add multiple sequences as required to reach the desired total bit length.
@@ -1119,36 +1193,20 @@ impl<'a> Sequences<'a> {
         Ok(self)
     }
 
-    /// Generate the bytes representing the DAP request packet for these sequences.
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut request = vec![self.num_sequences as u8];
-        request.extend_from_slice(&self.request[..]);
-        request
+    /// Return the byte representation of each DAP command to be sent.
+    pub fn to_bytes(&self) -> Vec<Vec<u8>> {
+        self.sequences.iter().map(|s| s.to_bytes()).collect()
     }
 
     /// Run these sequences, returning all captured TDO bits.
     pub fn run(self) -> Result<Vec<bool>> {
         if let Some(dap) = self.dap {
-            let request = self.to_bytes();
-            let result = dap.jtag_sequence(&request[..])?;
-            let expected_n_bytes = self.capture_lengths.iter().map(|l| (l+7)/8).sum::<usize>();
-            if result.len() != expected_n_bytes {
-                log::error!("Expected {} bytes from probe, but got {}",
-                            expected_n_bytes, result.len());
-                Err(Error::UnexpectedJTAGLength)
-            } else {
-                // The probe responds with byte-padded bits per request,
-                // e.g., with three one-cycle request, three bytes are
-                // returned, with one bit (the LSbit) set per byte.
-                // We combine those back into a single Vec of bits.
-                let mut bits = Vec::new();
-                let mut bytes = &result[..];
-                for l in self.capture_lengths.iter() {
-                    bits.append(&mut bytes_to_bits(bytes, *l)?);
-                    bytes = &bytes[(l+7)/8..];
-                }
-                Ok(bits)
+            let mut result = Vec::new();
+            for sequences in self.sequences {
+                let bits = sequences.run(dap)?;
+                result.extend_from_slice(&bits);
             }
+            Ok(result)
         } else {
             Err(Error::NoDAPProvided)
         }
@@ -1162,7 +1220,7 @@ fn test_sequences() {
     seqs.add_sequences(64, false, None, false).unwrap();
     assert_eq!(
         seqs.to_bytes(),
-        &[1, 0b0_0_00000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+        vec![vec![1, 0b0_0_00000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]]
     );
 
     // 65 bits should require 2 sequences.
@@ -1170,8 +1228,8 @@ fn test_sequences() {
     seqs.add_sequences(65, false, None, false).unwrap();
     assert_eq!(
         seqs.to_bytes(),
-        &[2, 0b0_0_00000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-             0b0_0_00000001, 0xFF]
+        vec![vec![2, 0b0_0_00000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                  0b0_0_00000001, 0xFF]]
     );
 
     // 65 bits with TDI provided.
@@ -1179,8 +1237,8 @@ fn test_sequences() {
     seqs.add_sequences(65, false, Some(&[false; 65]), false).unwrap();
     assert_eq!(
         seqs.to_bytes(),
-        &[2, 0b0_0_00000000, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-             0b0_0_00000001, 0x00]
+        vec![vec![2, 0b0_0_00000000, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                  0b0_0_00000001, 0x00]]
     );
 }
 
@@ -1189,25 +1247,25 @@ fn test_sequences_mode() {
     // No TMS bits generates no sequences.
     assert_eq!(
         Sequences::new().mode(bv![]).unwrap().to_bytes(),
-        &[0]
+        vec![vec![0]]
     );
 
     // One TMS bit generates one sequence with one clock.
     assert_eq!(
         Sequences::new().mode(bv![0]).unwrap().to_bytes(),
-        &[1, 0b0_0_000001, 0xFF]
+        vec![vec![1, 0b0_0_000001, 0xFF]]
     );
 
     // Four identical TMS bits generates one sequence with four clocks.
     assert_eq!(
         Sequences::new().mode(bv![1, 1, 1, 1]).unwrap().to_bytes(),
-        &[1, 0b0_1_000100, 0xFF]
+        vec![vec![1, 0b0_1_000100, 0xFF]]
     );
 
     // Three separate requests with 1, 3, and 1 clocks.
     assert_eq!(
         Sequences::new().mode(bv![0, 1, 1, 1, 0]).unwrap().to_bytes(),
-        &[3, 0b0_0_000001, 0xFF, 0b0_1_000011, 0xFF, 0b0_0_000001, 0xFF]
+        vec![vec![3, 0b0_0_000001, 0xFF, 0b0_1_000011, 0xFF, 0b0_0_000001, 0xFF]]
     );
 }
 
@@ -1216,19 +1274,19 @@ fn test_sequences_write() {
     // No exit bit generates one sequence with 4 clocks.
     assert_eq!(
         Sequences::new().write(bv![1, 0, 1, 0], false).unwrap().to_bytes(),
-        &[1, 0b0_0_000100, 0x05]
+        vec![vec![1, 0b0_0_000100, 0x05]]
     );
 
     // Exit bit set generates two sequences with TMS set on second.
     assert_eq!(
         Sequences::new().write(bv![1, 0, 1, 0], true).unwrap().to_bytes(),
-        &[2, 0b0_0_000011, 0x05, 0b0_1_000001, 0x00]
+        vec![vec![2, 0b0_0_000011, 0x05, 0b0_1_000001, 0x00]]
     );
 
     // Long sequence is split into multiple bytes.
     assert_eq!(
         Sequences::new().write(bv![1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1], false).unwrap().to_bytes(),
-        &[1, 0b0_0_001100, 0xFF, 0x08]
+        vec![vec![1, 0b0_0_001100, 0xFF, 0x08]]
     );
 }
 
@@ -1237,19 +1295,19 @@ fn test_sequences_read() {
     // No exit bit generates one sequence with 4 clocks, capture bit set.
     assert_eq!(
         Sequences::new().read(4, false).unwrap().to_bytes(),
-        &[1, 0b1_0_000100, 0xFF]
+        vec![vec![1, 0b1_0_000100, 0xFF]]
     );
 
     // Exit bit set generates two sequences with TMS set on second.
     assert_eq!(
         Sequences::new().read(4, true).unwrap().to_bytes(),
-        &[2, 0b1_0_000011, 0xFF, 0b1_1_000001, 0xFF]
+        vec![vec![2, 0b1_0_000011, 0xFF, 0b1_1_000001, 0xFF]]
     );
 
     // Long sequence results in multiple dummy bytes being sent.
     assert_eq!(
         Sequences::new().read(12, false).unwrap().to_bytes(),
-        &[1, 0b1_0_001100, 0xFF, 0xFF]
+        vec![vec![1, 0b1_0_001100, 0xFF, 0xFF]]
     );
 }
 
@@ -1258,19 +1316,20 @@ fn test_sequences_exchange() {
     // No exit bit generates one sequence with 4 clocks.
     assert_eq!(
         Sequences::new().exchange(bv![1, 0, 1, 0], false).unwrap().to_bytes(),
-        &[1, 0b1_0_000100, 0x05]
+        vec![vec![1, 0b1_0_000100, 0x05]]
     );
 
     // Exit bit set generates two sequences with TMS set on second.
     assert_eq!(
         Sequences::new().exchange(bv![1, 0, 1, 0], true).unwrap().to_bytes(),
-        &[2, 0b1_0_000011, 0x05, 0b1_1_000001, 0x00]
+        vec![vec![2, 0b1_0_000011, 0x05, 0b1_1_000001, 0x00]]
     );
 
     // Long sequence is split into multiple bytes.
     assert_eq!(
-        Sequences::new().exchange(bv![1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1], false).unwrap().to_bytes(),
-        &[1, 0b1_0_001100, 0xFF, 0x08]
+        Sequences::new().exchange(
+            bv![1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1], false).unwrap().to_bytes(),
+        vec![vec![1, 0b1_0_001100, 0xFF, 0x08]]
     );
 }
 
@@ -1282,7 +1341,34 @@ fn test_sequences_multiple() {
         Sequences::new().mode(bv![1, 1, 1, 1, 1, 0, 1, 0, 0]).unwrap()
                         .read(32, true).unwrap()
                         .to_bytes(),
-        &[6, 0b0_1_000101, 0xFF, 0b0_0_000001, 0xFF, 0b0_1_000001, 0xFF, 0b0_0_000010, 0xFF,
-             0b1_0_011111, 0xFF, 0xFF, 0xFF, 0xFF, 0b1_1_000001, 0xFF]
+        vec![vec![6,
+                  0b0_1_000101, 0xFF, 0b0_0_000001, 0xFF, 0b0_1_000001, 0xFF, 0b0_0_000010, 0xFF,
+                  0b1_0_011111, 0xFF, 0xFF, 0xFF, 0xFF, 0b1_1_000001, 0xFF]]
+    );
+}
+
+#[test]
+fn test_sequences_long() {
+    // Really long sequences should be split over multiple packets.
+    assert_eq!(
+        Sequences::new().read(1024, false).unwrap().to_bytes(),
+        vec![
+            vec![6, 0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+            vec![6, 0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+            vec![4, 0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0b1_0_000000, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+        ]
     );
 }
