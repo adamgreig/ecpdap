@@ -639,6 +639,11 @@ impl JTAGTAP {
         self.index
     }
 
+    /// Returns number of TAPs in the underlying chain.
+    pub fn n_taps(&self) -> usize {
+        self.chain.n_taps()
+    }
+
     /// Consume the JTAGTAP and return its JTAG and JTAGChain.
     pub fn release(self) -> (JTAG, JTAGChain) {
         (self.jtag, self.chain)

@@ -4,12 +4,14 @@ use std::convert::TryFrom;
 use std::fmt;
 use num_enum::{FromPrimitive, TryFromPrimitive};
 use crate::jtag::{IDCODE, JTAGTAP, Error as JTAGError};
-use crate::bitvec::{byte_to_bits, bytes_to_bits, drain_u32, Error as BitvecError};
+use crate::bitvec::{byte_to_bits, bytes_to_bits, bits_to_bytes, drain_u32, Error as BitvecError};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("ECP5 status register in incorrect state.")]
     BadStatus,
+    #[error("Cannot access flash memory unless the ECP5 is the only TAP in the JTAG chain.")]
+    NotOnlyTAP,
     #[error("JTAG error")]
     JTAG(#[from] JTAGError),
     #[error("Bitvec error")]
@@ -268,7 +270,32 @@ impl ECP5 {
 
         self.check_programmed_ok()?;
 
+        self.tap.run_test_idle(0)?;
+
         Ok(())
+    }
+
+    /// Place ECP5 into flash pass-through mode.
+    /// The current SRAM contents are cleared.
+    pub fn to_flash(mut self) -> Result<ECP5Flash> {
+        if self.tap.n_taps() > 1 {
+            log::error!(
+                "SPI flash access is not possible with more than one TAP in the JTAG chain.");
+            return Err(Error::NotOnlyTAP);
+        }
+
+        self.tap.run_test_idle(0)?;
+        self.command(Command::ISC_ENABLE)?;
+        self.tap.run_test_idle(50)?;
+        self.command(Command::ISC_ERASE)?;
+        self.tap.run_test_idle(50)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        self.command(Command::ISC_DISABLE)?;
+        self.tap.run_test_idle(50)?;
+        self.command(Command::LSC_BACKGROUND_SPI)?;
+        self.tap.write_dr(&bytes_to_bits(&[0xFE, 0x68], 16)?)?;
+        self.tap.run_test_idle(50)?;
+        Ok(ECP5Flash::new(self))
     }
 
     /// Reads current status and checks it seems suitable for SRAM programming.
@@ -285,8 +312,7 @@ impl ECP5 {
         match status.bse_error() {
             BSEError::NoError => (),
             error => {
-                log::error!("BSE error present: {:?}", error);
-                return Err(Error::BadStatus);
+                log::warn!("BSE error present: {:?}", error);
             }
         }
         if !status.jtag_active() {
@@ -334,5 +360,40 @@ impl ECP5 {
     fn command(&mut self, command: Command) -> Result<()> {
         log::trace!("Loading ECP5 command {:?}", command);
         Ok(self.tap.write_ir(&command.bits())?)
+    }
+}
+
+/// Access to attached SPI flash on an ECP5.
+pub struct ECP5Flash {
+    ecp5: ECP5,
+}
+
+impl ECP5Flash {
+    fn new(ecp5: ECP5) -> Self {
+        ECP5Flash { ecp5 }
+    }
+
+    pub fn release(self) -> ECP5 {
+        self.ecp5
+    }
+
+    pub fn write(&mut self, data: &[u8]) -> Result<()> {
+        let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
+        let bits = bytes_to_bits(&data, data.len() * 8)?;
+        self.ecp5.tap.run_test_idle(0)?;
+        self.ecp5.tap.write_dr(&bits)?;
+        self.ecp5.tap.run_test_idle(0)?;
+        Ok(())
+    }
+
+    pub fn exchange(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
+        let bits = bytes_to_bits(&data, data.len() * 8)?;
+        self.ecp5.tap.run_test_idle(0)?;
+        let result = self.ecp5.tap.exchange_dr(&bits)?;
+        self.ecp5.tap.run_test_idle(0)?;
+        let result = bits_to_bytes(&result);
+        let result: Vec<u8> = result.iter().map(|x| x.reverse_bits()).collect();
+        Ok(result)
     }
 }

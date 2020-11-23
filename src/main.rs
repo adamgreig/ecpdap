@@ -9,6 +9,7 @@ use ecpdap::probe::{Probe, ProbeInfo};
 use ecpdap::dap::DAP;
 use ecpdap::jtag::{JTAG, JTAGChain};
 use ecpdap::ecp5::ECP5;
+use ecpdap::flash::Flash;
 
 #[allow(clippy::cognitive_complexity)]
 fn main() -> anyhow::Result<()> {
@@ -97,10 +98,12 @@ fn main() -> anyhow::Result<()> {
                 .arg(Arg::with_name("length")
                      .help("Length (in bytes) of read")
                      .long("length")
+                     .takes_value(true)
                      .required(true))
                 .arg(Arg::with_name("offset")
                      .help("Start address (in bytes) of read")
                      .long("offset")
+                     .takes_value(true)
                      .default_value("0"))))
         .get_matches();
 
@@ -213,19 +216,45 @@ fn main() -> anyhow::Result<()> {
             let mut data = Vec::new();
             file.read_to_end(&mut data)?;
             ecp5.program(&data)?;
-            println!("Configuration programmed OK.");
+            if !quiet { println!("Configuration programmed OK.") };
         },
         Some("flash") => {
-            /*
+            let mut flash = Flash::new(ecp5)?;
             let matches = matches.subcommand_matches("flash").unwrap();
             match matches.subcommand_name() {
-                Some("id") => {},
-                Some("erase") => {},
-                Some("write") => {},
-                Some("read") => {},
+                Some("id") => {
+                    let id = flash.read_id()?;
+                    println!("{}", id);
+                },
+                Some("erase") => {
+                    flash.erase()?;
+                    if !quiet { println!("Flash erased.") };
+                },
+                Some("write") => {
+                    let matches = matches.subcommand_matches("write").unwrap();
+                    let path = matches.value_of("file").unwrap();
+                    let offset = value_t!(matches, "offset", u32).unwrap();
+                    let verify = !matches.is_present("no-verify");
+                    let mut file = File::open(path)?;
+                    let mut data = Vec::new();
+                    file.read_to_end(&mut data)?;
+                    if !quiet { println!("Programming flash...") };
+                    flash.program(offset, &data, verify)?;
+                    if !quiet { println!("Flash programmed.") };
+                },
+                Some("read") => {
+                    let matches = matches.subcommand_matches("read").unwrap();
+                    let path = matches.value_of("file").unwrap();
+                    let offset = value_t!(matches, "offset", u32).unwrap();
+                    let length = value_t!(matches, "length", usize).unwrap();
+                    let mut file = File::create(path)?;
+                    if !quiet { println!("Reading flash...") };
+                    let data = flash.read(offset, length)?;
+                    file.write_all(&data)?;
+                    if !quiet { println!("Flash read.") };
+                },
                 _ => panic!("Unhandled flash subcommand."),
             }
-            */
         },
         _ => panic!("Unhandled command."),
     }

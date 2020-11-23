@@ -11,6 +11,7 @@ pub mod probe;
 pub mod dap;
 pub mod jtag;
 pub mod ecp5;
+pub mod flash;
 
 #[derive(Error, Debug)]
 pub enum Error {
