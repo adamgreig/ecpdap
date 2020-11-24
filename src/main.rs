@@ -48,14 +48,16 @@ fn main() -> anyhow::Result<()> {
              .global(true))
         .arg(Arg::with_name("ir-lengths")
              .help("Lengths of each IR, starting from TAP 0, comma-separated")
-             .long("ir-lengths")
+             .long("ir")
+             .short("i")
              .multiple(true)
              .require_delimiter(true)
              .takes_value(true)
              .global(true))
         .arg(Arg::with_name("scan-chain-length")
-             .help("Maximum JTAG scan chain length in bits, for both IR and DR")
-             .long("scan-chain-length")
+             .help("Maximum JTAG scan chain length to check")
+             .long("length")
+             .short("l")
              .takes_value(true)
              .default_value("192")
              .global(true))
@@ -132,6 +134,7 @@ fn main() -> anyhow::Result<()> {
 
     // At this point we can handle the reset command.
     if matches.subcommand_name().unwrap() == "reset" {
+        if !quiet { println!("Pulsing nRST line.") };
         return Ok(jtag.pulse_nrst(Duration::from_millis(100))?);
     }
 
@@ -227,6 +230,7 @@ fn main() -> anyhow::Result<()> {
                     println!("{}", id);
                 },
                 Some("erase") => {
+                    if !quiet { println!("Erasing flash...") };
                     flash.erase()?;
                     if !quiet { println!("Flash erased.") };
                 },
