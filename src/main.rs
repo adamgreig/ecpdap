@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
              .global(true))
         .arg(Arg::with_name("scan-chain-length")
              .help("Maximum JTAG scan chain length to check")
-             .long("length")
+             .long("jtag-length")
              .short("l")
              .takes_value(true)
              .default_value("192")
