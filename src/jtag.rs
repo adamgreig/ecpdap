@@ -1027,17 +1027,21 @@ impl DAPSequences {
         let request = self.to_bytes();
         let result = dap.jtag_sequence(&request[..])?;
         let expected_n_bytes = self.capture_lengths.iter().map(|l| (l+7)/8).sum::<usize>();
+        // Check for undersized data from probe.
         if result.len() < expected_n_bytes {
-            log::error!("Expected {} bytes from probe, but got {}",
+            log::error!("Expected at least {} bytes from probe, but only got {}",
                         expected_n_bytes, result.len());
             Err(Error::UnexpectedJTAGLength)
         } else {
+            // CMSIS-DAPv1 probes will always return a full HID report of 64 bytes,
+            // even if the payload contains less data, so truncate the result.
+            // v2 probes always return the correct number of bytes.
+            let mut bytes = &result[..expected_n_bytes];
             // The probe responds with byte-padded bits per request,
             // e.g., with three one-cycle request, three bytes are
             // returned, with one bit (the LSbit) set per byte.
             // We combine those back into a single Vec of bits.
             let mut bits = Vec::new();
-            let mut bytes = &result[..expected_n_bytes];
             for l in self.capture_lengths.iter() {
                 bits.append(&mut bytes_to_bits(bytes, *l)?);
                 bytes = &bytes[(l+7)/8..];

@@ -128,9 +128,15 @@ impl Probe {
     }
 
     pub fn read(&self) -> Result<Vec<u8>> {
-        let mut buf = vec![0u8; 1024];
+        // Read up to 64 bytes for HID devices, or the maximum packet size for v2 devices.
+        let bufsize = match self {
+            Self::V1(_) => 64,
+            Self::V2 { handle, out_ep: _, in_ep: _ } =>
+                handle.device().device_descriptor()?.max_packet_size().into(),
+        };
+        let mut buf = vec![0u8; bufsize];
         let n = match self {
-            Self::V1(device) => device.read_timeout(&mut buf[..], 100)?,
+            Self::V1(device) => device.read_timeout(&mut buf[..], 10)?,
             Self::V2 { handle, out_ep: _, in_ep } => {
                 let timeout = Duration::from_millis(100);
                 handle.read_bulk(*in_ep, &mut buf[..], timeout)?
@@ -155,7 +161,7 @@ impl Probe {
                 Ok(device.write(&buf[..])?)
             },
             Self::V2 { handle, out_ep, in_ep: _ } => {
-                let timeout = Duration::from_millis(100);
+                let timeout = Duration::from_millis(10);
                 Ok(handle.write_bulk(*out_ep, buf, timeout)?)
             },
         }
