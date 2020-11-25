@@ -3,6 +3,7 @@
 use std::convert::TryFrom;
 use std::fmt;
 use num_enum::{FromPrimitive, TryFromPrimitive};
+use indicatif::{ProgressBar, ProgressStyle};
 use crate::jtag::{IDCODE, JTAGTAP, Error as JTAGError};
 use crate::bitvec::{byte_to_bits, bytes_to_bits, bits_to_bytes, drain_u32, Error as BitvecError};
 
@@ -255,11 +256,22 @@ impl ECP5 {
 
         self.command(Command::LSC_BITSTREAM_BURST)?;
 
+        // Create a progress bar for loading.
+        let pb = ProgressBar::new(data.len() as u64).with_style(ProgressStyle::default_bar()
+            .template(" {msg} [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}; {eta})")
+            .progress_chars("=> "));
+        pb.set_message("Programming");
+
         // Load in entire bitstream.
         // We have to bit-reverse each byte of bitstream for the ECP5.
         let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
         let bits = bytes_to_bits(&data, data.len() * 8)?;
-        self.tap.write_dr(&bits)?;
+
+        // Write in ten-packet chunks, to give the progress bar something to do.
+        for chunk in bits.chunks(self.tap.max_tdi_bits() * 10) {
+            self.tap.write_dr_raw(&chunk)?;
+            pb.inc(chunk.len() as u64 / 8);
+        }
 
         // Return to Run-Test/Idle to complete programming.
         self.tap.run_test_idle(1)?;
@@ -284,6 +296,7 @@ impl ECP5 {
             return Err(Error::NotOnlyTAP);
         }
 
+        // Enable ISC to erase SRAM content, required before SPI passthrough is used.
         self.tap.run_test_idle(0)?;
         self.command(Command::ISC_ENABLE)?;
         self.tap.run_test_idle(50)?;
@@ -292,9 +305,12 @@ impl ECP5 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         self.command(Command::ISC_DISABLE)?;
         self.tap.run_test_idle(50)?;
+
+        // Enable SPI mode and shift in magic numbers.
         self.command(Command::LSC_BACKGROUND_SPI)?;
         self.tap.write_dr(&bytes_to_bits(&[0xFE, 0x68], 16)?)?;
         self.tap.run_test_idle(50)?;
+
         Ok(ECP5Flash::new(self))
     }
 

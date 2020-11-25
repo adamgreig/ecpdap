@@ -29,6 +29,8 @@ pub enum Error {
     InvalidIR,
     #[error("Invalid index: does not exist in JTAG scan chain.")]
     InvalidTAPIndex,
+    #[error("Attempted raw DR write with multiple TAPs in chain.")]
+    MultipleTAPs,
     #[error("Provided IR command was the wrong length for the TAP.")]
     WrongIRLength,
     #[error("Bit vector error")]
@@ -264,12 +266,20 @@ impl JTAG {
         Ok(tdo)
     }
 
-    /// Move to Shift-DR, write `tdi` to DR.
+    /// Move to Shift-DR, write `tdi` to DR, enter Update-DR.
     pub fn write_dr(&mut self, tdi: &[bool]) -> Result<()> {
         log::debug!("Writing to DR: {:?}", bits_to_bytes(tdi));
         self.enter_shift_dr()?;
         self.write(tdi, true)?;
         self.enter_update_dr()?;
+        Ok(())
+    }
+
+    /// Move to Shift-DR, write `tdi` to DR, remain in Shift-DR.
+    pub fn write_dr_and_stay(&mut self, tdi: &[bool]) -> Result<()> {
+        log::debug!("Writing to DR: {:?}", bits_to_bytes(tdi));
+        self.enter_shift_dr()?;
+        self.write(tdi, false)?;
         Ok(())
     }
 
@@ -644,6 +654,20 @@ impl JTAGTAP {
         self.chain.n_taps()
     }
 
+    /// Returns maximum number of TDI bits we can fit into a single DAP packet.
+    pub fn max_tdi_bits(&self) -> usize {
+        // Packet size minus two header bytes.
+        let bytes = self.jtag.dap.packet_size() - 2;
+        // As many 64-bit sequences as possible, 9 bytes each (1 byte header, 8 bytes data).
+        let full = bytes / 9;
+        // Mop up the rest, after another 1 byte header.
+        let remaining = bytes - (full * 9) - 1;
+        // Convert to bits.
+        let bits = (full * 64) + (remaining * 8);
+        log::trace!("Computed maximum TDI bits as {}", bits);
+        bits
+    }
+
     /// Consume the JTAGTAP and return its JTAG and JTAGChain.
     pub fn release(self) -> (JTAG, JTAGChain) {
         (self.jtag, self.chain)
@@ -702,18 +726,31 @@ impl JTAGTAP {
         Ok(tdo)
     }
 
-    /// Move to Shift-DR, write `dr` to DR.
+    /// Move to Shift-DR and write `dr` to DR.
+    /// Exits Shift-DR and enters Update-DR once complete.
     pub fn write_dr(&mut self, dr: &[bool]) -> Result<()> {
         // Add dummy bits before and after our IR as required.
         let mut tdi = vec![true; self.dr_prefix];
         tdi.extend_from_slice(dr);
         tdi.extend_from_slice(&vec![true; self.dr_suffix]);
 
-        self.jtag.write_dr(&tdi)?;
-        Ok(())
+        self.jtag.write_dr(&tdi)
+    }
+
+    /// Move to Shift-DR if not already there and write `dr` directly,
+    /// without any prefix or suffix for our TAP position, and remain
+    /// in Shift-DR afterwards.
+    /// This method requires that only one TAP is present in the chain.
+    pub fn write_dr_raw(&mut self, dr: &[bool]) -> Result<()> {
+        if self.n_taps() == 1 {
+            self.jtag.write_dr_and_stay(&dr)
+        } else {
+            Err(Error::MultipleTAPs)
+        }
     }
 
     /// Move to Shift-DR, read `n` bits of DR while writing 0xFF.
+    /// Exits Shift-DR and enters Update-DR once complete.
     /// Returns the captured bits from TDO.
     pub fn read_dr(&mut self, n: usize) -> Result<Vec<bool>> {
         let tdo = self.jtag.read_dr(self.dr_prefix + n + self.dr_suffix)?;
@@ -722,6 +759,7 @@ impl JTAGTAP {
     }
 
     /// Move to Shift-DR, write `dr` to DR while capturing TDO.
+    /// Exits Shift-DR and enters Update-DR once complete.
     /// Returns the captured bits from TDO.
     pub fn exchange_dr(&mut self, dr: &[bool]) -> Result<Vec<bool>> {
         // Add dummy bits before and after our IR as required.
@@ -954,6 +992,16 @@ impl DAPSequences {
         2 + self.request.len() + 1 + nbytes <= self.max_packet
     }
 
+    /// Work out the largest number of clock cycles
+    /// which would fit in the current DAPSequence packet.
+    pub fn longest_sequence(&self) -> usize {
+        // Number of bytes left in packet after adding one more header word.
+        let bytes = self.max_packet - 2 - self.request.len() - 1;
+
+        // Largest number of bits we could take as a single sequence.
+        usize::min(64, bytes * 8)
+    }
+
     /// Add a new sequence to this set of sequences.
     ///
     /// len: number of clock cycles, from 1 to 64.
@@ -1089,7 +1137,7 @@ impl<'a> Sequences<'a> {
 
     /// Add multiple sequences as required to reach the desired total bit length.
     ///
-    /// len: number of clock cycles, limited only by maximum packet size.
+    /// len: number of clock cycles.
     /// tms: value to set TMS during these sequence.
     /// tdi: optional data to clock out TDI, bits in transmission order,
     ///      set to all-1 if None.
@@ -1105,35 +1153,66 @@ impl<'a> Sequences<'a> {
             }
         }
 
+        // Add individual sequeneces up to 64 bits at a time,
+        // creating new sequence packets when required.
         let mut idx = 0;
         while idx < len {
-            let n = usize::min(len - idx, 64);
+            let n = usize::min(len - idx, self.sequences_max_len());
             match tdi {
                 Some(tdi) => self.add_sequence(n, tms, Some(&tdi[idx..idx+n]), capture)?,
                 None      => self.add_sequence(n, tms, None, capture)?,
             }
-            idx += 64;
+            idx += n;
         }
         Ok(())
+    }
+
+    /// Returns DAP packet size to use for creating a new DAPSequences.
+    fn packet_size(&self) -> usize {
+        match self.dap {
+            Some(dap) => dap.packet_size(),
+            None => 64,
+        }
+    }
+
+    /// Create a new empty DAPSequences.
+    fn new_sequences(&mut self) {
+        self.sequences.push(DAPSequences::new(self.packet_size()));
     }
 
     /// Returns the DAPSequences to use for a new request of length `len`,
     /// creating it if necessary.
     fn sequences_for_len(&mut self, len: usize) -> &mut DAPSequences {
-        let packet_size = match self.dap {
-            Some(dap) => dap.packet_size(),
-            None => 64,
-        };
-
-        if let Some(sequences) = self.sequences.last_mut() {
+        if let Some(sequences) = self.sequences.last() {
             if !sequences.can_fit_sequence(len) {
-                self.sequences.push(DAPSequences::new(packet_size));
+                self.new_sequences();
             }
         } else {
-            self.sequences.push(DAPSequences::new(packet_size));
+            self.new_sequences();
         }
 
         self.sequences.last_mut().unwrap()
+    }
+
+    /// Returns the largest number of bits which could be added to the current
+    /// DAPSeqeuences packet in a single request; the smaller of 64 or the limit
+    /// incurred due to the maximum packet length.
+    ///
+    /// If the current sequence is full, creates a new one and returns 64.
+    fn sequences_max_len(&mut self) -> usize {
+        match self.sequences.last() {
+            Some(sequences) => match sequences.longest_sequence() {
+                0 => {
+                    self.new_sequences();
+                    64
+                },
+                n => n,
+            }
+            None => {
+                self.new_sequences();
+                64
+            }
+        }
     }
 
     /// Shift out `tms` bits.
