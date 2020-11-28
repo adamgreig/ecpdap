@@ -38,6 +38,7 @@ pub enum Probe {
         handle: rusb::DeviceHandle<rusb::Context>,
         out_ep: u8,
         in_ep: u8,
+        max_packet_size: u16,
     },
 }
 
@@ -99,7 +100,8 @@ impl Probe {
                         log::debug!("Successfully opened v2 probe: {:?}", device);
                         let out_ep = eps[0].address();
                         let in_ep = eps[1].address();
-                        return Ok(Probe::V2 { handle, out_ep, in_ep });
+                        let max_packet_size = eps[1].max_packet_size();
+                        return Ok(Probe::V2 { handle, out_ep, in_ep, max_packet_size });
                     }
                     Err(_) => continue,
                 }
@@ -131,13 +133,13 @@ impl Probe {
         // Read up to 64 bytes for HID devices, or the maximum packet size for v2 devices.
         let bufsize = match self {
             Self::V1(_) => 64,
-            Self::V2 { handle, out_ep: _, in_ep: _ } =>
-                handle.device().device_descriptor()?.max_packet_size().into(),
+            Self::V2 { handle, out_ep: _, in_ep: _ , max_packet_size } =>
+                *max_packet_size as usize,
         };
         let mut buf = vec![0u8; bufsize];
         let n = match self {
             Self::V1(device) => device.read_timeout(&mut buf[..], 10)?,
-            Self::V2 { handle, out_ep: _, in_ep } => {
+            Self::V2 { handle, out_ep: _, in_ep, .. } => {
                 let timeout = Duration::from_millis(100);
                 handle.read_bulk(*in_ep, &mut buf[..], timeout)?
             },
@@ -160,7 +162,7 @@ impl Probe {
                 buf.insert(0, 0);
                 Ok(device.write(&buf[..])?)
             },
-            Self::V2 { handle, out_ep, in_ep: _ } => {
+            Self::V2 { handle, out_ep, in_ep: _, .. } => {
                 let timeout = Duration::from_millis(10);
                 Ok(handle.write_bulk(*out_ep, buf, timeout)?)
             },
