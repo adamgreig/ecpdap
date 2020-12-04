@@ -118,6 +118,16 @@ impl Flash {
         self.command(Command::Reset)
     }
 
+    /// Unprotect the flash memory
+    pub fn unprotect(&mut self) -> Result<()> {
+        let status1 = self.read_status1()?;
+        let status2 = self.read_status2()?;
+        let new_status1 = status1 & 0b11100011;
+        self.write_enable()?;
+        self.write_status(new_status1, status2)?;
+        Ok(())
+    }
+
     /// Power down the attached flash
     pub fn power_down(&mut self) -> Result<()> {
         self.command(Command::PowerDown)
@@ -217,6 +227,10 @@ impl Flash {
 
     fn read_status1(&mut self) -> Result<u8> {
         self.exchange(Command::ReadStatusRegister1, &[], 1).map(|data| data[0])
+    }
+
+    fn write_status(&mut self, status1: u8, status2: u8) -> Result<()> {
+        self.write(Command::WriteStatusRegister, &[status1, status2])
     }
 
     #[allow(dead_code)]
