@@ -106,7 +106,9 @@ fn main() -> anyhow::Result<()> {
                      .help("Start address (in bytes) of read")
                      .long("offset")
                      .takes_value(true)
-                     .default_value("0"))))
+                     .default_value("0")))
+            .subcommand(SubCommand::with_name("unprotect")
+                .about("Unprotect SPI flash")))
         .get_matches();
 
     pretty_env_logger::init();
@@ -257,6 +259,11 @@ fn main() -> anyhow::Result<()> {
                     file.write_all(&data)?;
                     if !quiet { println!("Flash read.") };
                 },
+                Some("unprotect") => {
+                    if !quiet { println!("Disabling flash write protection...") };
+                    flash.unprotect()?;
+                    if !quiet { println!("Flash protected disabled.") };
+                }
                 _ => panic!("Unhandled flash subcommand."),
             }
         },
