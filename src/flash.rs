@@ -180,7 +180,7 @@ impl Flash {
     }
 
     fn page_program(&mut self, address: u32, data: &[u8]) -> Result<()> {
-        assert!(data.len() >= 1, "Cannot program 0 bytes of data");
+        assert!(!data.is_empty(), "Cannot program 0 bytes of data");
         assert!(data.len() <= 256, "Cannot program more than 256 bytes per page");
         let mut tx = address.to_be_bytes()[1..].to_vec();
         tx.extend(data);
@@ -222,7 +222,7 @@ impl Flash {
 
     fn read_unique_id(&mut self) -> Result<u64> {
         self.exchange(Command::ReadUniqueID, &[], 4+8)
-            .and_then(|data| Ok(u64::from_be_bytes((&data[4..]).try_into().unwrap())))
+            .map(|data| u64::from_be_bytes((&data[4..]).try_into().unwrap()))
     }
 
     fn read_status1(&mut self) -> Result<u8> {

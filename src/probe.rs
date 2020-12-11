@@ -133,7 +133,7 @@ impl Probe {
         // Read up to 64 bytes for HID devices, or the maximum packet size for v2 devices.
         let bufsize = match self {
             Self::V1(_) => 64,
-            Self::V2 { handle, out_ep: _, in_ep: _ , max_packet_size } =>
+            Self::V2 { handle: _, out_ep: _, in_ep: _ , max_packet_size } =>
                 *max_packet_size as usize,
         };
         let mut buf = vec![0u8; bufsize];

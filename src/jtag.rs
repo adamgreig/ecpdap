@@ -981,7 +981,7 @@ impl DAPSequences {
             num_sequences: 0,
             capture_lengths: Vec::new(),
             request: Vec::new(),
-            max_packet: max_packet,
+            max_packet,
         }
     }
 
