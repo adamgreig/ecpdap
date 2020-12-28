@@ -6,6 +6,7 @@ use num_enum::{FromPrimitive, TryFromPrimitive};
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::jtag::{IDCODE, JTAGTAP, Error as JTAGError};
 use crate::bitvec::{byte_to_bits, bytes_to_bits, bits_to_bytes, drain_u32, Error as BitvecError};
+use crate::flash::{FlashAccess, Result as FlashResult};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -392,8 +393,10 @@ impl ECP5Flash {
     pub fn release(self) -> ECP5 {
         self.ecp5
     }
+}
 
-    pub fn write(&mut self, data: &[u8]) -> Result<()> {
+impl FlashAccess for ECP5Flash {
+    fn write(&mut self, data: &[u8]) -> FlashResult<()> {
         let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
         let bits = bytes_to_bits(&data, data.len() * 8)?;
         self.ecp5.tap.run_test_idle(0)?;
@@ -402,7 +405,7 @@ impl ECP5Flash {
         Ok(())
     }
 
-    pub fn exchange(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+    fn exchange(&mut self, data: &[u8]) -> FlashResult<Vec<u8>> {
         let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
         let bits = bytes_to_bits(&data, data.len() * 8)?;
         self.ecp5.tap.run_test_idle(0)?;

@@ -77,6 +77,8 @@ fn main() -> anyhow::Result<()> {
             .setting(AppSettings::SubcommandRequiredElseHelp)
             .subcommand(SubCommand::with_name("id")
                 .about("Read SPI flash ID"))
+            .subcommand(SubCommand::with_name("scan")
+                .about("Read SPI flash information"))
             .subcommand(SubCommand::with_name("erase")
                 .about("Erase SPI flash"))
             .subcommand(SubCommand::with_name("write")
@@ -97,16 +99,15 @@ fn main() -> anyhow::Result<()> {
                 .arg(Arg::with_name("file")
                      .help("File to write SPI flash contents to")
                      .required(true))
-                .arg(Arg::with_name("length")
-                     .help("Length (in bytes) of read")
-                     .long("length")
-                     .takes_value(true)
-                     .required(true))
                 .arg(Arg::with_name("offset")
                      .help("Start address (in bytes) of read")
                      .long("offset")
                      .takes_value(true)
-                     .default_value("0")))
+                     .default_value("0"))
+                .arg(Arg::with_name("length")
+                     .help("Length (in bytes) of read, defaults to detected capacity")
+                     .long("length")
+                     .takes_value(true)))
             .subcommand(SubCommand::with_name("unprotect")
                 .about("Unprotect SPI flash")))
         .get_matches();
@@ -224,12 +225,21 @@ fn main() -> anyhow::Result<()> {
             if !quiet { println!("Configuration programmed OK.") };
         },
         Some("flash") => {
-            let mut flash = Flash::new(ecp5)?;
+            let mut ecp5_flash = ecp5.to_flash()?;
+            let mut flash = Flash::new(&mut ecp5_flash);
             let matches = matches.subcommand_matches("flash").unwrap();
             match matches.subcommand_name() {
                 Some("id") => {
                     let id = flash.read_id()?;
                     println!("{}", id);
+                },
+                Some("scan") => {
+                    let id = flash.read_id()?;
+                    println!("{}", id);
+                    if !quiet { println!("Reading flash parameters...") };
+                    let params = flash.read_sfdp_jedec_params()?;
+                    println!("{:?}", params);
+                    println!("Detected capacity: {}kB", params.capacity_bytes() / 1024);
                 },
                 Some("erase") => {
                     if !quiet { println!("Erasing flash...") };
@@ -252,7 +262,11 @@ fn main() -> anyhow::Result<()> {
                     let matches = matches.subcommand_matches("read").unwrap();
                     let path = matches.value_of("file").unwrap();
                     let offset = value_t!(matches, "offset", u32).unwrap();
-                    let length = value_t!(matches, "length", usize).unwrap();
+                    let length = if matches.is_present("length") {
+                        value_t!(matches, "length", usize).unwrap()
+                    } else {
+                        flash.detect_capacity()?
+                    };
                     let mut file = File::create(path)?;
                     if !quiet { println!("Reading flash...") };
                     let data = flash.read(offset, length)?;
