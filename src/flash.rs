@@ -29,43 +29,84 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Standard SPI flash command opcodes.
+///
+/// These are taken from the Winbond W25Q16JV datasheet, but most are
+/// widely applicable. If SFDP is supported, it is used to discover
+/// the relevant erase opcodes and sizes.
+///
+/// Only single I/O commands are listed.
 #[derive(Copy, Clone, Debug)]
 #[allow(unused)]
 #[repr(u8)]
 enum Command {
+    // Core instruction set.
+    // These commands are almost universally available.
     WriteEnable = 0x06,
     WriteDisable = 0x04,
-    ReadStatusRegister1 = 0x05,
-    ReadStatusRegister2 = 0x35,
-    WriteStatusRegister = 0x01,
-    PageProgram = 0x02,
-    SectorErase = 0x20,
-    BlockErase32KB = 0x52,
-    BlockErase64KB = 0xD8,
-    ChipErase = 0xC7,
-    ProgramSuspend = 0x75,
-    ProgramResume = 0x7A,
-    PowerDown = 0xB9,
     ReadData = 0x03,
+    PageProgram = 0x02,
+    ReadStatusRegister1 = 0x05,
+    WriteStatusRegister1 = 0x01,
+
+    // Standard instruction set.
+    // These commands are typically available.
+    ReadJEDECID = 0x9F,
     FastRead = 0x0B,
+    Powerdown = 0xB9,
     ReleasePowerdown = 0xAB,
     ReadDeviceID = 0x90,
-    ReadJEDECID = 0x9F,
+    ChipErase = 0xC7,
+
+    // Extended instruction set.
+    // These commands may be available.
     ReadUniqueID = 0x4B,
     ReadSFDPRegister = 0x5A,
+    ReadStatusRegister2 = 0x35,
+    ReadStatusRegister3 = 0x15,
+    WriteStatusRegister2 = 0x31,
+    WriteStatusRegister3 = 0x11,
     EnableReset = 0x66,
     Reset = 0x99,
+    ProgramSuspend = 0x75,
+    ProgramResume = 0x7A,
+
+    // Erase instructions.
+    // The size affected by each erase operation can vary.
+    // A typical value is 4kB sector, 32kB block erase 1, 64kB block erase 2.
+    SectorErase = 0x20,
+    BlockErase1 = 0x52,
+    BlockErase2 = 0xD8,
+
+    // Security/lock related instructions.
+    EraseSecurityRegisters = 0x44,
+    ProgramSecurityRegisters = 0x42,
+    ReadSecurityRegisters = 0x48,
+    IndividualBlockLock = 0x36,
+    IndividualBlockUnlock = 0x39,
+    ReadBlockLock = 0x3D,
+    GlobalBlockLock = 0x7E,
+    GlobalBlockUnlock = 0x98,
 }
 
+/// Store the ID read off an SPI flash memory.
+///
+/// The manufacturer ID and (long, 16-bit) device ID are read using the 0x9F command,
+/// and the number of 0x7F continuation code bytes present before the manufacturer ID
+/// is stored as `manufacturer_bank`.
+///
+/// The 64-bit unique ID is read using the 0x4B command.
 #[derive(Copy, Clone, Debug)]
 pub struct FlashID {
-    manufacturer_bank: u8,
-    manufacturer_id: u8,
-    device_id: u16,
-    unique_id: u64,
+    pub manufacturer_bank: u8,
+    pub manufacturer_id: u8,
+    pub device_id_long: u16,
+    pub device_id_short: u8,
+    pub unique_id: u64,
 }
 
 impl FlashID {
+    /// Look up a manufacturer name from the JEDEC ID.
     pub fn manufacturer_name(&self) -> Option<&'static str> {
         let (bank, id) = (self.manufacturer_bank, self.manufacturer_id & 0x7F);
         match jep106::JEP106Code::new(bank, id).get() {
@@ -83,15 +124,24 @@ impl std::fmt::Display for FlashID {
             Some(mfn) => format!(" ({})", mfn),
             None => "".to_string(),
         };
-        write!(f, "Manufacturer 0x{:02X}{}, Device 0x{:04X}, Unique ID {:016X}",
-               self.manufacturer_id, mfn, self.device_id, self.unique_id)
+        write!(f, "Manufacturer 0x{:02X}{}, Device 0x{:02X}/0x{:04X}, Unique ID {:016X}",
+               self.manufacturer_id, mfn, self.device_id_short,
+               self.device_id_long, self.unique_id)
     }
 }
 
 /// Trait for objects which provide access to SPI flash.
+///
+/// Providers only need to implement `exchange()`, which asserts CS, writes all the bytes
+/// in `data`, then returns all the received bytes. If it provides a performance optimisation,
+/// providers may also implement `write()`, which does not require the received data.
 pub trait FlashAccess {
     /// Assert CS, write all bytes in `data` to the SPI bus, then de-assert CS.
-    fn write(&mut self, data: &[u8]) -> Result<()>;
+    fn write(&mut self, data: &[u8]) -> Result<()> {
+        // Default implementation uses `exchange()` and ignores the result data.
+        self.exchange(data)?;
+        Ok(())
+    }
 
     /// Assert CS, write all bytes in `data` while capturing received data, then de-assert CS.
     ///
@@ -99,27 +149,42 @@ pub trait FlashAccess {
     fn exchange(&mut self, data: &[u8]) -> Result<Vec<u8>>;
 }
 
+/// SPI Flash.
+///
+/// This struct provides methods for interacting with common SPI flashes.
 pub struct Flash<'a, A: FlashAccess> {
     access: &'a mut A,
 }
 
 impl<'a, A: FlashAccess> Flash<'a, A> {
-    /// Create a new Flash instance wrapping a FlashAccess provider.
+    /// Create a new Flash instance using the given FlashAccess provider.
     pub fn new(access: &'a mut A) -> Self {
         Flash { access }
     }
 
-    /// Read the attached flash device, manufacturer, and unique IDs
+    /// Read the device's manufacturer ID and device IDs.
+    ///
+    /// This method additionally brings the flash out of powerdown and resets it.
     pub fn read_id(&mut self) -> Result<FlashID> {
+        log::debug!("Reading SPI Flash ID");
         self.power_up()?;
         self.reset()?;
-        let (manufacturer_bank, manufacturer_id, device_id) = self.read_jedec_id()?;
-        // XXX: Without sleep, subsequent commands return all 0s.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (manufacturer_bank, manufacturer_id, device_id_long) = self.read_jedec_id()?;
+        let (_, _, device_id_short) = self.read_device_id()?;
         let unique_id = self.read_unique_id()?;
-        // XXX: Without sleep, subsequent commands return all 0s.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        Ok(FlashID { manufacturer_bank, manufacturer_id, device_id, unique_id })
+        Ok(FlashID {
+            manufacturer_bank, manufacturer_id, device_id_short, device_id_long, unique_id
+        })
+    }
+
+    /// Read SFDP JEDEC Basic Flash Parameter table from flash.
+    ///
+    /// This fails if SFDP is not supported by the flash memory.
+    ///
+    /// Depending on the version of SFDP supported, some fields may
+    /// not be available.
+    pub fn read_sfdp_basic_params(&mut self) -> Result<JEDECBasicParams> {
+        Err(Error::InvalidSFDPParams)
     }
 
     /// Attempt to discover memory capacity in bytes.
@@ -169,23 +234,25 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
         self.command(Command::Reset)
     }
 
-    /// Unprotect the flash memory
+    /// Unprotect the flash memory.
     pub fn unprotect(&mut self) -> Result<()> {
         let status1 = self.read_status1()?;
         let status2 = self.read_status2()?;
         let new_status1 = status1 & 0b11100011;
         self.write_enable()?;
-        self.write_status(new_status1, status2)?;
+        self.write_status1(new_status1, status2)?;
         Ok(())
     }
 
-    /// Power down the attached flash
+    /// Power down the flash.
     pub fn power_down(&mut self) -> Result<()> {
-        self.command(Command::PowerDown)
+        log::debug!("Sending Powerdown command");
+        self.command(Command::Powerdown)
     }
 
-    /// Power up the attached flash
+    /// Power up the flash.
     pub fn power_up(&mut self) -> Result<()> {
+        log::debug!("Sending Release Powerdown command");
         self.command(Command::ReleasePowerdown)
     }
 
@@ -211,7 +278,7 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
         if length % BLOCK_SIZE != 0 { n_blocks += 1 };
         for block in 0..n_blocks {
             self.write_enable()?;
-            self.block_erase_64k(address + (block * BLOCK_SIZE) as u32)?;
+            self.block_erase_2(address + (block * BLOCK_SIZE) as u32)?;
             self.wait_while_busy()?;
         }
         Ok(())
@@ -262,14 +329,14 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
         self.command(Command::ChipErase)
     }
 
-    fn block_erase_64k(&mut self, address: u32) -> Result<()> {
-        self.exchange(Command::BlockErase64KB, &address.to_be_bytes()[1..], 0)?;
+    fn block_erase_2(&mut self, address: u32) -> Result<()> {
+        self.exchange(Command::BlockErase2, &address.to_be_bytes()[1..], 0)?;
         Ok(())
     }
 
     #[allow(dead_code)]
-    fn block_erase_32k(&mut self, address: u32) -> Result<()> {
-        self.exchange(Command::BlockErase32KB, &address.to_be_bytes()[1..], 0)?;
+    fn block_erase_1(&mut self, address: u32) -> Result<()> {
+        self.exchange(Command::BlockErase1, &address.to_be_bytes()[1..], 0)?;
         Ok(())
     }
 
@@ -279,36 +346,70 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
         Ok(())
     }
 
-    /// Reads the JEDEC manufacturer and device IDs.
+    /// Reads the JEDEC manufacturer and long (16-bit) device IDs.
     ///
-    /// The manufacturer ID may be prefixed with any number of the
+    /// The manufacturer ID may be prefixed with up to 13 of the
     /// continuation code 0x7F; the number of continuation codes
     /// is returned as the bank number.
     ///
     /// Returns (bank, manufacturer ID, device ID).
     fn read_jedec_id(&mut self) -> Result<(u8, u8, u16)> {
-        for n in 0..=11 {
-            let data = self.exchange(Command::ReadJEDECID, &[], n+3)?;
-            if data[n] != 0x7F {
-                let device_id = u16::from_be_bytes([data[n+1], data[n+2]]);
-                return Ok((n as u8, data[n], device_id));
+        // Attempt to read assuming a single-byte manufacturer ID.
+        let data = self.exchange(Command::ReadJEDECID, &[], 3)?;
+        if data[0] != 0x7F {
+            Ok((0, data[0], u16::from_be_bytes([data[1], data[2]])))
+        } else {
+            // If the first byte is continuation, read 16 bytes, to allow
+            // up to 13 continuation bytes, and then parse it to find the IDs.
+            let data = self.exchange(Command::ReadJEDECID, &[], 16)?;
+            for n in 1..=13 {
+                if data[n] != 0x7F {
+                    return Ok((n as u8, data[n], u16::from_be_bytes([data[n+1], data[n+2]])));
+                }
             }
+            log::error!("Found more than 11 continuation bytes in manufacturer ID");
+            Err(Error::InvalidManufacturer)
         }
-        log::error!("Found more than 11 continuation bytes in manufacturer ID");
-        Err(Error::InvalidManufacturer)
     }
 
+    /// Reads the JEDEC manufacturer and short (8-bit) device IDs.
+    ///
+    /// The manufacturer ID may be prefixed with up to 13 of the
+    /// continuation code 0x7F; the number of continuation codes
+    /// is returned as the bank number.
+    ///
+    /// Returns (bank, manufacturer ID, device ID).
+    fn read_device_id(&mut self) -> Result<(u8, u8, u8)> {
+        // Attempt to read assuming a single-byte manufacturer ID.
+        let data = self.exchange(Command::ReadDeviceID, &[0, 0, 0], 2)?;
+        if data[0] != 0x7F {
+            Ok((0, data[0], data[1]))
+        } else {
+            // If the first byte is continuation, read 15 bytes, to allow
+            // up to 13 continuation bytes, and then parse it to find the IDs.
+            let data = self.exchange(Command::ReadJEDECID, &[0, 0, 0], 15)?;
+            for n in 1..=13 {
+                if data[n] != 0x7F {
+                    return Ok((n as u8, data[n], data[n+1]))
+                }
+            }
+            log::error!("Found more than 11 continuation bytes in manufacturer ID");
+            Err(Error::InvalidManufacturer)
+        }
+    }
+
+    /// Read the device's unique ID, if present.
     fn read_unique_id(&mut self) -> Result<u64> {
-        self.exchange(Command::ReadUniqueID, &[], 4+8)
-            .map(|data| u64::from_be_bytes((&data[4..]).try_into().unwrap()))
+        self.exchange(Command::ReadUniqueID, &[0, 0, 0, 0], 8)
+            .map(|data| u64::from_be_bytes(data.try_into().unwrap()))
     }
 
     fn read_status1(&mut self) -> Result<u8> {
         self.exchange(Command::ReadStatusRegister1, &[], 1).map(|data| data[0])
     }
 
-    fn write_status(&mut self, status1: u8, status2: u8) -> Result<()> {
-        self.write(Command::WriteStatusRegister, &[status1, status2])
+    fn write_status1(&mut self, status1: u8, status2: u8) -> Result<()> {
+        self.write(Command::WriteStatusRegister1, &[status1, status2])
     }
 
     fn read_status2(&mut self) -> Result<u8> {
@@ -421,6 +522,175 @@ impl SFDPParameterHeader {
     }
 }
 
+/// JEDEC Basic Flash Parameter Table
+///
+/// This table contains standard SFDP information which may be
+/// read from a flash memory. Only fields relevant to single I/O
+/// operation are parsed.
+///
+/// Fields are taken from JESD216D-01, supporting parameter versions
+/// up to 1.7.
+#[derive(Copy, Clone, Debug)]
+pub struct JEDECBasicParams {
+    /// Parameter header major version field.
+    pub version_major: u8,
+    /// Parameter header minor version field.
+    pub version_minor: u8,
+
+    /// Number of address bytes to use in read/write commands.
+    pub address_bytes: SFDPAddressBytes,
+    /// Flash memory density in bits.
+    pub density: u64,
+
+    /// If true, 4kB erase is supported.
+    /// Newer memories indicate all erase sizes with `erase_*` fields.
+    pub legacy_4kb_erase_supported: bool,
+    /// Instruction for 4kB erase, or 0xFF if unsupported.
+    /// Newer memories also include this instruction in `erase_*` fields.
+    pub legacy_erase_4kb_inst: u8,
+    /// Write enable instruction for volatile status register, either 0x50 or 0x06.
+    /// Newer memories use `write_en_inst` instead.
+    pub legacy_write_en_inst: u8,
+    /// If true, Block Protect bits in status register are only volatile,
+    /// otherwise they may be only non-volatile or may be programmed either
+    /// as volatile with instruction 0x50 or non-volatile with instruction 0x06.
+    /// Newer memories use `write_en_inst` instead.
+    pub legacy_block_protect_volatile: bool,
+    /// If true, writes can be performed with byte granularity.
+    /// Newer memories use `page_size`.
+    pub legacy_byte_write_granularity: bool,
+
+    /// Erase instructions.
+    ///
+    /// Up to four erase instructions may be available,
+    /// each specifying the opcode for the instruction
+    /// and the number of bytes erased.
+    pub erase_insts: [Option<SFDPEraseInst>; 4],
+
+    /// Typical time to erase the entire chip, if known.
+    pub chip_erase_time_typ: Option<std::time::Duration>,
+    /// Maximum time to erase the entire chip, if known.
+    pub chip_erase_time_max: Option<std::time::Duration>,
+    /// Typical time to program the first byte in a sequence, if known.
+    pub first_byte_prog_time_typ: Option<std::time::Duration>,
+    /// Maximum time to program the first byte in a sequence, if known.
+    pub first_byte_prog_time_max: Option<std::time::Duration>,
+    /// Typical time to program each successive byte in a sequence, if known.
+    pub succ_byte_prog_time_typ: Option<std::time::Duration>,
+    /// Maximum time to program each successive byte in a sequence, if known.
+    pub succ_byte_prog_time_max: Option<std::time::Duration>,
+    /// Typical time to program a full page, if known.
+    pub page_prog_time_typ: Option<std::time::Duration>,
+    /// Maximum time to program a full page, if known.
+    pub page_prog_time_max: Option<std::time::Duration>,
+
+    /// Page size, in bytes.
+    pub page_size: Option<u32>,
+
+    // Omitted: Suspend/Resume support and instructions.
+
+    /// Deep Powerdown supported.
+    pub deep_powerdown_supported: Option<bool>,
+    /// Instruction for entering deep powerdown, if supported.
+    pub enter_deep_powerdown_inst: Option<u8>,
+    /// Instruction for exiting deep powerdown, if supported.
+    pub exit_deep_powerdown_inst: Option<u8>,
+    /// Maximum time required to exit deep powerdown and be ready for next instruction.
+    pub exit_deep_powerdown_time: Option<std::time::Duration>,
+
+    /// If true, polling busy status via the flag status register is supported.
+    /// Instruction 0x70 reads the flag register, where bit 7 is 0 if busy and 1 if ready.
+    pub busy_poll_flag: Option<bool>,
+    /// If true, polling busy status via the status register is supported.
+    /// Instruction 0x05 reads the status register, where bit 0 is 0 if ready and 1 if busy.
+    pub busy_poll_status: Option<bool>,
+
+    // Omitted: instructions for entering/exiting 4-byte address mode.
+
+    /// If true, the device may be reset using instruction 0xF0.
+    pub reset_inst_f0: Option<bool>,
+    /// If true, the device may be reset using instruction 0x66 followed by 0x99.
+    pub reset_inst_66_99: Option<bool>,
+
+    /// Status register 1 volatility and write-enable instruction.
+    pub status_1_vol: Option<SFDPStatus1Volatility>,
+}
+
+/// SFDP Address Bytes field.
+#[derive(Copy, Clone, Debug)]
+pub enum SFDPAddressBytes {
+    /// Three-byte only addressing.
+    Three,
+    /// Three- or four-byte addressing; default is three-byte
+    /// but may be configured for four-byte.
+    ThreeOrFour,
+    /// Four-byte only addressing.
+    Four,
+    /// Reserved as of JESD216D-01, JEDEC Basic Flash Parameters version 1.7.
+    Reserved,
+}
+
+impl SFDPAddressBytes {
+    fn from_bits(bits: u8) -> Self {
+        match bits {
+            0b00 => SFDPAddressBytes::Three,
+            0b01 => SFDPAddressBytes::ThreeOrFour,
+            0b10 => SFDPAddressBytes::Four,
+            _    => SFDPAddressBytes::Reserved,
+        }
+    }
+}
+
+/// SFDP Erase Instruction.
+#[derive(Copy, Clone, Debug)]
+pub struct SFDPEraseInst {
+    /// Opcode for erase instruction.
+    pub opcode: u8,
+    /// Size in bytes of erase instruction.
+    pub size: u32,
+    /// Typical erase time, if known.
+    pub time_typ: Option<std::time::Duration>,
+    /// Maximum erase time, if known.
+    pub time_max: Option<std::time::Duration>,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum SFDPStatus1Volatility {
+    /// Status register 1 is non-volatile, powers up to its last state, write-enable with 0x06.
+    NonVolatile06,
+    /// Status register 1 is volatile, powers up to all '1', write-enable with 0x06.
+    Volatile06,
+    /// Status register 1 is volatile, powers up to all '1', write-enable with 0x50.
+    Volatile50,
+    /// Status register 1 powers up to its last non-volatile state, use 0x06
+    /// to write to non-volatile register, or use 0x06 to active and write
+    /// volatile register.
+    NonVolatile06Volatile50,
+    /// Status register 1 contains a mix of volatile and non-vilatile bits.
+    /// Use instruction 0x06 to write.
+    Mixed06,
+    /// Reserved volatility mode.
+    Reserved,
+}
+
+impl SFDPStatus1Volatility {
+    pub fn from_bits(bits: u8) -> Self {
+        if bits & 0b000_0001 != 0 {
+            SFDPStatus1Volatility::NonVolatile06
+        } else if bits & 0b000_0010 != 0 {
+            SFDPStatus1Volatility::Volatile06
+        } else if bits & 0b000_0100 != 0 {
+            SFDPStatus1Volatility::Volatile50
+        } else if bits & 0b000_1000 != 0 {
+            SFDPStatus1Volatility::NonVolatile06Volatile50
+        } else if bits & 0b001_0000 != 0 {
+            SFDPStatus1Volatility::Mixed06
+        } else {
+            SFDPStatus1Volatility::Reserved
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct SFDPJEDECParams {
     addr_bytes: SFDPAddressBytes,
@@ -440,24 +710,6 @@ pub struct SFDPJEDECParams {
     erase_4kb_available: bool,
 }
 
-#[derive(Copy, Clone, Debug)]
-pub enum SFDPAddressBytes {
-    Three,
-    ThreeOrFour,
-    Four,
-    Reserved,
-}
-
-impl SFDPAddressBytes {
-    fn from_bits(bits: u8) -> Self {
-        match bits {
-            0b00 => SFDPAddressBytes::Three,
-            0b01 => SFDPAddressBytes::ThreeOrFour,
-            0b10 => SFDPAddressBytes::Four,
-            _    => SFDPAddressBytes::Reserved,
-        }
-    }
-}
 
 impl SFDPJEDECParams {
     fn from_bytes(data: &[u8]) -> Self {
