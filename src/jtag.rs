@@ -110,7 +110,7 @@ impl JTAG {
 
     /// Create a new JTAG TAP, allowing read/write access to a single TAP
     /// on the chain.
-    pub fn to_tap(self, chain: JTAGChain, index: usize) -> Result<JTAGTAP> {
+    pub fn into_tap(self, chain: JTAGChain, index: usize) -> Result<JTAGTAP> {
         if index < chain.n_taps() {
             Ok(JTAGTAP::new(self, chain, index))
         } else {

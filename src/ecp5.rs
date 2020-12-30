@@ -6,7 +6,7 @@ use num_enum::{FromPrimitive, TryFromPrimitive};
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::jtag::{IDCODE, JTAGTAP, Error as JTAGError};
 use crate::bitvec::{byte_to_bits, bytes_to_bits, bits_to_bytes, drain_u32, Error as BitvecError};
-use crate::flash::{FlashAccess, Result as FlashResult};
+use crate::flash::FlashAccess;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -290,7 +290,7 @@ impl ECP5 {
 
     /// Place ECP5 into flash pass-through mode.
     /// The current SRAM contents are cleared.
-    pub fn to_flash(mut self) -> Result<ECP5Flash> {
+    pub fn into_flash(mut self) -> Result<ECP5Flash> {
         if self.tap.n_taps() > 1 {
             log::error!(
                 "SPI flash access is not possible with more than one TAP in the JTAG chain.");
@@ -396,7 +396,7 @@ impl ECP5Flash {
 }
 
 impl FlashAccess for ECP5Flash {
-    fn write(&mut self, data: &[u8]) -> FlashResult<()> {
+    fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
         let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
         let bits = bytes_to_bits(&data, data.len() * 8)?;
         self.ecp5.tap.run_test_idle(0)?;
@@ -405,7 +405,7 @@ impl FlashAccess for ECP5Flash {
         Ok(())
     }
 
-    fn exchange(&mut self, data: &[u8]) -> FlashResult<Vec<u8>> {
+    fn exchange(&mut self, data: &[u8]) -> anyhow::Result<Vec<u8>> {
         let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
         let bits = bytes_to_bits(&data, data.len() * 8)?;
         self.ecp5.tap.run_test_idle(0)?;

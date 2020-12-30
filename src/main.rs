@@ -208,7 +208,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Create a TAP instance, consuming the JTAG instance.
-    let tap = jtag.to_tap(chain, tap_idx)?;
+    let tap = jtag.into_tap(chain, tap_idx)?;
 
     // Create an ECP5 instance from the TAP.
     let mut ecp5 = ECP5::new(tap);
@@ -225,7 +225,7 @@ fn main() -> anyhow::Result<()> {
             if !quiet { println!("Configuration programmed OK.") };
         },
         Some("flash") => {
-            let mut ecp5_flash = ecp5.to_flash()?;
+            let mut ecp5_flash = ecp5.into_flash()?;
             let mut flash = Flash::new(&mut ecp5_flash);
             let matches = matches.subcommand_matches("flash").unwrap();
             match matches.subcommand_name() {
@@ -237,13 +237,14 @@ fn main() -> anyhow::Result<()> {
                     let id = flash.read_id()?;
                     println!("{}", id);
                     if !quiet { println!("Reading flash parameters...") };
-                    let params = flash.read_sfdp_jedec_params()?;
-                    println!("{:?}", params);
+                    let params = flash.read_params()?;
+                    //println!("{:X?}", params);
+                    dbg!(params);
                     println!("Detected capacity: {}kB", params.capacity_bytes() / 1024);
                 },
                 Some("erase") => {
                     if !quiet { println!("Erasing flash...") };
-                    flash.erase()?;
+                    flash.chip_erase()?;
                     if !quiet { println!("Flash erased.") };
                 },
                 Some("write") => {
@@ -265,7 +266,8 @@ fn main() -> anyhow::Result<()> {
                     let length = if matches.is_present("length") {
                         value_t!(matches, "length", usize).unwrap()
                     } else {
-                        flash.detect_capacity()?
+                        //flash.detect_capacity()?
+                        0
                     };
                     let mut file = File::create(path)?;
                     if !quiet { println!("Reading flash...") };
