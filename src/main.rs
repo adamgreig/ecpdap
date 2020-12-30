@@ -234,13 +234,12 @@ fn main() -> anyhow::Result<()> {
                     println!("{}", id);
                 },
                 Some("scan") => {
+                    if !quiet { println!("Reading flash ID...") };
                     let id = flash.read_id()?;
                     println!("{}", id);
-                    if !quiet { println!("Reading flash parameters...") };
+                    if !quiet { println!("\nReading flash parameters...") };
                     let params = flash.read_params()?;
-                    //println!("{:X?}", params);
-                    dbg!(params);
-                    println!("Detected capacity: {}kB", params.capacity_bytes() / 1024);
+                    println!("{}", params);
                 },
                 Some("erase") => {
                     if !quiet { println!("Erasing flash...") };

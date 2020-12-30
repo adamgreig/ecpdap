@@ -264,9 +264,9 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
         if let Some((size, opcode)) = params.sector_erase() {
             self.sector_size = Some(size);
             self.erase_sector_opcode = opcode;
-        } else if params.legacy_4kb_erase_supported && params.legacy_erase_4kb_inst != 0xFF {
+        } else if params.legacy_4kb_erase_supported && params.legacy_4kb_erase_inst != 0xFF {
             self.sector_size = Some(4096);
-            self.erase_sector_opcode = params.legacy_erase_4kb_inst;
+            self.erase_sector_opcode = params.legacy_4kb_erase_inst;
         }
         log::debug!("Updated settings from parameters:");
         log::debug!("Address bytes: {}, capacity: {:?} bytes",
@@ -721,9 +721,13 @@ impl std::fmt::Display for FlashID {
             Some(mfn) => format!(" ({})", mfn),
             None => "".to_string(),
         };
-        write!(f, "Manufacturer 0x{:02X}{}, Device 0x{:02X}/0x{:04X}, Unique ID {:016X}",
+        let unique_id = match self.unique_id {
+            0x0000_0000_0000_0000 | 0xFFFF_FFFF_FFFF_FFFF => "".to_string(),
+            id => format!(", Unique ID: {:016X}", id),
+        };
+        write!(f, "Manufacturer 0x{:02X}{}, Device 0x{:02X}/0x{:04X}{}",
                self.manufacturer_id, mfn, self.device_id_short,
-               self.device_id_long, self.unique_id)
+               self.device_id_long, unique_id)
     }
 }
 
@@ -809,7 +813,7 @@ pub struct FlashParams {
     pub legacy_4kb_erase_supported: bool,
     /// Instruction for 4kB erase, or 0xFF if unsupported.
     /// Newer memories also include this instruction in `erase_*` fields.
-    pub legacy_erase_4kb_inst: u8,
+    pub legacy_4kb_erase_inst: u8,
     /// Write enable instruction for volatile status register, either 0x50 or 0x06.
     /// Newer memories use `status_1_vol` instead.
     pub legacy_volatile_write_en_inst: u8,
@@ -829,22 +833,8 @@ pub struct FlashParams {
     /// and the number of bytes erased.
     pub erase_insts: [Option<SFDPEraseInst>; 4],
 
-    /// Typical time to erase the entire chip, if known.
-    pub chip_erase_time_typ: Option<Duration>,
-    /// Maximum time to erase the entire chip, if known.
-    pub chip_erase_time_max: Option<Duration>,
-    /// Typical time to program the first byte in a sequence, if known.
-    pub first_byte_prog_time_typ: Option<Duration>,
-    /// Maximum time to program the first byte in a sequence, if known.
-    pub first_byte_prog_time_max: Option<Duration>,
-    /// Typical time to program each successive byte in a sequence, if known.
-    pub succ_byte_prog_time_typ: Option<Duration>,
-    /// Maximum time to program each successive byte in a sequence, if known.
-    pub succ_byte_prog_time_max: Option<Duration>,
-    /// Typical time to program a full page, if known.
-    pub page_prog_time_typ: Option<Duration>,
-    /// Maximum time to program a full page, if known.
-    pub page_prog_time_max: Option<Duration>,
+    /// Chip erase and programming times, if available.
+    pub timing: Option<SFDPTiming>,
 
     /// Page size, in bytes.
     pub page_size: Option<u32>,
@@ -909,6 +899,19 @@ pub struct SFDPEraseInst {
     pub time_max: Option<std::time::Duration>,
 }
 
+impl std::fmt::Display for SFDPEraseInst {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Opcode 0x{:02X}: {} bytes", self.opcode, self.size)?;
+        if let Some(typ) = self.time_typ {
+            write!(f, ", typ {:?}", typ)?;
+        }
+        if let Some(max) = self.time_max {
+            write!(f, ", max {:?}", max)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub enum SFDPStatus1Volatility {
     /// Status register 1 is non-volatile, powers up to its last state, write-enable with 0x06.
@@ -946,6 +949,32 @@ impl SFDPStatus1Volatility {
     }
 }
 
+/// Struct of timing information from JESD216A-compliant tables.
+///
+/// Note that erase instruction timing is stored inside the respective erase instructions.
+#[derive(Copy, Clone, Debug)]
+pub struct SFDPTiming {
+    /// Typical time to erase the entire chip, if known.
+    pub chip_erase_time_typ: Duration,
+    /// Maximum time to erase the entire chip, if known.
+    pub chip_erase_time_max: Duration,
+    /// Typical time to program the first byte in a sequence, if known.
+    pub first_byte_prog_time_typ: Duration,
+    /// Maximum time to program the first byte in a sequence, if known.
+    pub first_byte_prog_time_max: Duration,
+    /// Typical time to program each successive byte in a sequence, if known.
+    pub succ_byte_prog_time_typ: Duration,
+    /// Maximum time to program each successive byte in a sequence, if known.
+    pub succ_byte_prog_time_max: Duration,
+    /// Typical time to program a full page, if known.
+    pub page_prog_time_typ: Duration,
+    /// Maximum time to program a full page, if known.
+    pub page_prog_time_max: Duration,
+}
+
+/// Bitfield extraction helper macro.
+///
+/// `bits!(word, length, offset)` extracts `length` number of bits at offset `offset`.
 macro_rules! bits {
     ($d:expr, $n:expr, $o:expr) => {($d & (((1 << $n) - 1) << $o)) >> $o}
 }
@@ -975,9 +1004,51 @@ impl FlashParams {
             dwords.push(u32::from_be_bytes([bytes[3], bytes[2], bytes[1], bytes[0]]));
         }
 
+        // Parse the first 9 DWORDs, which must always be available if SFDP is supported.
+        let mut params = Self::read_jesd216(major, minor, &dwords);
+
+        // 1.5: JESD216A adds DWORDs 10-16.
+        if minor >= 5 {
+            params.read_jesd216a(&dwords);
+        }
+
+        // 1.6: JESD216B adds quad-SPI information to DWORD15 bits 8, 14, and 18.
+        // 1.7: JESD216C adds DWORDs 17-20 which describe octal SPI.
+        // 1.8: JESD216D doesn't change the basic flash parameters table.
+
+        Ok(params)
+    }
+
+    /// Get the flash capacity in bytes.
+    pub fn capacity_bytes(&self) -> usize {
+        (self.density / 8) as usize
+    }
+
+    /// Get the smallest erase granularity and its opcode.
+    pub fn sector_erase(&self) -> Option<(usize, u8)> {
+        let mut size = u32::MAX;
+        let mut opcode = 0u8;
+        for inst in self.erase_insts.iter() {
+            if let Some(inst) = inst {
+                if inst.size < size {
+                    size = inst.size;
+                    opcode = inst.opcode;
+                }
+            }
+        }
+
+        if size != u32::MAX {
+            Some((size as usize, opcode))
+        } else {
+            None
+        }
+    }
+
+    /// Read the legacy information from JESD216 (DWORDs 1-9) and create a new FlashParams object.
+    fn read_jesd216(major: u8, minor: u8, dwords: &[u32]) -> FlashParams {
         // 1st DWORD
         let address_bytes = SFDPAddressBytes::from_bits(bits!(dwords[0], 2, 17));
-        let legacy_erase_4kb_inst = bits!(dwords[0], 8, 8) as u8;
+        let legacy_4kb_erase_inst = bits!(dwords[0], 8, 8) as u8;
         let legacy_volatile_write_en_inst = match bits!(dwords[0], 1, 4) {
             0 => 0x50,
             1 => 0x06,
@@ -989,7 +1060,7 @@ impl FlashParams {
 
         // 2nd DWORD
         let density = if dwords[1] >> 31 == 0 {
-            dwords[1] as u64
+            (dwords[1] as u64) + 1
         } else {
             1u64 << (dwords[1] & 0x7FFF_FFFF)
         };
@@ -1035,116 +1106,84 @@ impl FlashParams {
             }
         }
 
-        // Subsequent DWORDs are only defined in JESD216A and above, which
-        // use a minor version number of 5 and above. Create the FlashParams
-        // object with what we've got so far, and update it with the extra
-        // DWORDs if available.
-        let mut params = FlashParams {
+        // Return a FlashParams with the legacy information set and further information
+        // cleared, which can be filled in if additional DWORDs are available.
+        FlashParams {
             version_major: major, version_minor: minor,
-            address_bytes, density, legacy_4kb_erase_supported, legacy_erase_4kb_inst,
+            address_bytes, density, legacy_4kb_erase_supported, legacy_4kb_erase_inst,
             legacy_volatile_write_en_inst, legacy_block_protect_volatile,
             legacy_byte_write_granularity, erase_insts,
-            chip_erase_time_typ: None, chip_erase_time_max: None,
-            first_byte_prog_time_typ: None, first_byte_prog_time_max: None,
-            succ_byte_prog_time_typ: None, succ_byte_prog_time_max: None,
-            page_prog_time_typ: None, page_prog_time_max: None,
-            page_size: None, busy_poll_flag: None, busy_poll_status: None,
+            timing: None, page_size: None, busy_poll_flag: None, busy_poll_status: None,
             reset_inst_f0: None, reset_inst_66_99: None, status_1_vol: None,
-        };
-
-        if minor < 5 {
-            return Ok(params);
         }
+    }
 
-        // 10th DWORD
+    /// Parse JESD216A DWORDs 10 to 16.
+    fn read_jesd216a(&mut self, dwords: &[u32]) {
+        // 10th DWORD: erase instruction timings.
         let erase_scale = bits!(dwords[9], 4, 0);
-        if let Some(inst) = params.erase_insts[0].as_mut() {
+        if let Some(inst) = self.erase_insts[0].as_mut() {
             let typ = bits!(dwords[9], 7, 4);
             let (typ, max) = Self::sector_erase_durations(typ, erase_scale);
             inst.time_typ = Some(typ);
             inst.time_max = Some(max);
         }
-        if let Some(inst) = params.erase_insts[1].as_mut() {
+        if let Some(inst) = self.erase_insts[1].as_mut() {
             let typ = bits!(dwords[9], 7, 11);
             let (typ, max) = Self::sector_erase_durations(typ, erase_scale);
             inst.time_typ = Some(typ);
             inst.time_max = Some(max);
         }
-        if let Some(inst) = params.erase_insts[2].as_mut() {
+        if let Some(inst) = self.erase_insts[2].as_mut() {
             let typ = bits!(dwords[9], 7, 18);
             let (typ, max) = Self::sector_erase_durations(typ, erase_scale);
             inst.time_typ = Some(typ);
             inst.time_max = Some(max);
         }
-        if let Some(inst) = params.erase_insts[3].as_mut() {
+        if let Some(inst) = self.erase_insts[3].as_mut() {
             let typ = bits!(dwords[9], 7, 25);
             let (typ, max) = Self::sector_erase_durations(typ, erase_scale);
             inst.time_typ = Some(typ);
             inst.time_max = Some(max);
         }
 
-        // 11th DWORD
+        // 11th DWORD: chip erase and programming timings, page size.
         let typ = bits!(dwords[10], 7, 24);
-        let (typ, max) = Self::chip_erase_duration(typ, erase_scale);
-        params.chip_erase_time_typ = Some(typ);
-        params.chip_erase_time_max = Some(max);
+        let (chip_erase_time_typ, chip_erase_time_max) =
+            Self::chip_erase_duration(typ, erase_scale);
         let program_scale = bits!(dwords[10], 4, 0);
         let typ = bits!(dwords[10], 5, 19);
-        let (typ, max) = Self::byte_program_duration(typ, program_scale);
-        params.succ_byte_prog_time_typ = Some(typ);
-        params.succ_byte_prog_time_max = Some(max);
+        let (succ_byte_prog_time_typ, succ_byte_prog_time_max) =
+            Self::byte_program_duration(typ, program_scale);
         let typ = bits!(dwords[10], 5, 14);
-        let (typ, max) = Self::byte_program_duration(typ, program_scale);
-        params.first_byte_prog_time_typ = Some(typ);
-        params.first_byte_prog_time_max = Some(max);
+        let (first_byte_prog_time_typ, first_byte_prog_time_max) =
+            Self::byte_program_duration(typ, program_scale);
         let typ = bits!(dwords[10], 6, 8);
-        let (typ, max) = Self::page_program_duration(typ, program_scale);
-        params.page_prog_time_typ = Some(typ);
-        params.page_prog_time_max = Some(max);
-        params.page_size = Some(1 << bits!(dwords[10], 4, 4));
+        let (page_prog_time_typ, page_prog_time_max) =
+            Self::page_program_duration(typ, program_scale);
+        self.timing = Some(SFDPTiming {
+            chip_erase_time_typ, chip_erase_time_max,
+            succ_byte_prog_time_typ, succ_byte_prog_time_max,
+            first_byte_prog_time_typ, first_byte_prog_time_max,
+            page_prog_time_typ, page_prog_time_max,
+        });
+        self.page_size = Some(1 << bits!(dwords[10], 4, 4));
 
         // 12th and 13th DWORDs skipped: suspend/resume.
 
         // 14th DWORD
         let status_reg_poll = bits!(dwords[13], 6, 2);
-        params.busy_poll_flag = Some((status_reg_poll & 0b00_0010) != 0);
-        params.busy_poll_status = Some((status_reg_poll & 0b00_0001) != 0);
+        self.busy_poll_flag = Some((status_reg_poll & 0b00_0010) != 0);
+        self.busy_poll_status = Some((status_reg_poll & 0b00_0001) != 0);
 
         // 15th DWORD skipped: multiple I/O.
 
         // 16th DWORD
         let reset = bits!(dwords[15], 6, 8);
-        params.reset_inst_f0 = Some((reset & 0b00_1000) != 0);
-        params.reset_inst_66_99 = Some((reset & 0b01_0000) != 0);
+        self.reset_inst_f0 = Some((reset & 0b00_1000) != 0);
+        self.reset_inst_66_99 = Some((reset & 0b01_0000) != 0);
         let vol = bits!(dwords[15], 7, 0);
-        params.status_1_vol = Some(SFDPStatus1Volatility::from_bits(vol));
-
-        Ok(params)
-    }
-
-    /// Get the flash capacity in bytes.
-    pub fn capacity_bytes(&self) -> usize {
-        ((self.density + 1) / 8) as usize
-    }
-
-    /// Get the smallest erase granularity and its opcode.
-    pub fn sector_erase(&self) -> Option<(usize, u8)> {
-        let mut size = u32::MAX;
-        let mut opcode = 0u8;
-        for inst in self.erase_insts.iter() {
-            if let Some(inst) = inst {
-                if inst.size < size {
-                    size = inst.size;
-                    opcode = inst.opcode;
-                }
-            }
-        }
-
-        if size != u32::MAX {
-            Some((size as usize, opcode))
-        } else {
-            None
-        }
+        self.status_1_vol = Some(SFDPStatus1Volatility::from_bits(vol));
     }
 
     /// Convert SFPD sector erase time to typical and maximum Duration.
@@ -1209,6 +1248,59 @@ impl FlashParams {
         let typ = (count + 1) * scale;
         let max = 2 * (max_scale + 1) * typ;
         (typ, max)
+    }
+}
+
+impl std::fmt::Display for FlashParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        writeln!(f, "SFDP JEDEC Basic Flash Parameter Table v{}.{}",
+               self.version_major, self.version_minor)?;
+        writeln!(f, "  Density: {} bits ({} KiB)", self.density, self.capacity_bytes() / 1024)?;
+        writeln!(f, "  Address bytes: {:?}", self.address_bytes)?;
+        writeln!(f, "  Legacy information:")?;
+        writeln!(f, "    4kB erase supported: {}", self.legacy_4kb_erase_supported)?;
+        writeln!(f, "    4kB erase opcode: 0x{:02X}", self.legacy_4kb_erase_inst)?;
+        writeln!(f, "    Block Protect always volatile: {}", self.legacy_block_protect_volatile)?;
+        writeln!(f, "    Volatile write enable opcode: 0x{:02X}", self.legacy_volatile_write_en_inst)?;
+        writeln!(f, "    Writes have byte granularity: {}", self.legacy_byte_write_granularity)?;
+        writeln!(f, "  Erase instructions:")?;
+        for i in 0..4 {
+            if let Some(inst) = self.erase_insts[i] {
+                writeln!(f, "    {}: {}", i+1, inst)?;
+            } else {
+                writeln!(f, "    {}: Not present", i+1)?;
+            }
+        }
+        if let Some(timing) = self.timing {
+            writeln!(f, "  Timing:")?;
+            writeln!(f, "    Chip erase: typ {:?}, max {:?}",
+                     timing.chip_erase_time_typ, timing.chip_erase_time_max)?;
+            writeln!(f, "    First byte program: typ {:?}, max {:?}",
+                     timing.first_byte_prog_time_typ, timing.first_byte_prog_time_max)?;
+            writeln!(f, "    Subsequent byte program: typ {:?}, max {:?}",
+                     timing.succ_byte_prog_time_typ, timing.succ_byte_prog_time_max)?;
+            writeln!(f, "    Page program: typ {:?}, max {:?}",
+                     timing.page_prog_time_typ, timing.page_prog_time_max)?;
+        }
+        if let Some(page_size) = self.page_size {
+            writeln!(f, "  Page size: {} bytes", page_size)?;
+        }
+        if let Some(busy_poll_flag) = self.busy_poll_flag {
+            writeln!(f, "  Poll busy from FSR: {}", busy_poll_flag)?;
+        }
+        if let Some(busy_poll_status) = self.busy_poll_status {
+            writeln!(f, "  Poll busy from SR1: {}", busy_poll_status)?;
+        }
+        if let Some(reset_inst_f0) = self.reset_inst_f0 {
+            writeln!(f, "  Reset using opcode 0xF0: {}", reset_inst_f0)?;
+        }
+        if let Some(reset_inst_66_99) = self.reset_inst_66_99 {
+            writeln!(f, "  Reset using opcodes 0x66, 0x99: {}", reset_inst_66_99)?;
+        }
+        if let Some(status_1_vol) = self.status_1_vol {
+            writeln!(f, "  Status register 1 volatility: {:?}", status_1_vol)?;
+        }
+        Ok(())
     }
 }
 
@@ -1308,7 +1400,7 @@ impl StatusRegister3 {
         self.0 & 0b0000_0100 != 0
     }
 
-    /// Set WPS (write protect selecetion) bit.
+    /// Set WPS (write protect selection) bit.
     fn set_wps(&mut self, wps: bool) {
         self.0 &= 0b1111_1011;
         self.0 |= (wps as u8) << 2;
