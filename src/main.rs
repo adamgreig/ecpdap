@@ -78,9 +78,9 @@ fn main() -> anyhow::Result<()> {
             .subcommand(SubCommand::with_name("id")
                 .about("Read SPI flash ID"))
             .subcommand(SubCommand::with_name("scan")
-                .about("Read SPI flash information"))
+                .about("Read SPI flash parameters"))
             .subcommand(SubCommand::with_name("erase")
-                .about("Erase SPI flash"))
+                .about("Erase entire SPI flash"))
             .subcommand(SubCommand::with_name("write")
                 .about("Write binary file to SPI flash")
                 .arg(Arg::with_name("file")
@@ -108,8 +108,11 @@ fn main() -> anyhow::Result<()> {
                      .help("Length (in bytes) of read, defaults to detected capacity")
                      .long("length")
                      .takes_value(true)))
+            .subcommand(SubCommand::with_name("protect")
+                .about("Set all block protection bits in status register"))
             .subcommand(SubCommand::with_name("unprotect")
-                .about("Unprotect SPI flash")))
+                .about("Clear all block protection bits in status register"))
+            )
         .get_matches();
 
     pretty_env_logger::init();
@@ -227,6 +230,9 @@ fn main() -> anyhow::Result<()> {
         Some("flash") => {
             let mut ecp5_flash = ecp5.into_flash()?;
             let mut flash = Flash::new(&mut ecp5_flash);
+            // Always read parameter table if available, to load
+            // settings for address bytes, capacity, opcodes, etc.
+            flash.read_params()?;
             let matches = matches.subcommand_matches("flash").unwrap();
             match matches.subcommand_name() {
                 Some("id") => {
@@ -238,13 +244,27 @@ fn main() -> anyhow::Result<()> {
                     let id = flash.read_id()?;
                     println!("{}", id);
                     if !quiet { println!("\nReading flash parameters...") };
-                    let params = flash.read_params()?;
-                    println!("{}", params);
+                    match flash.get_params() {
+                        Some(params) => println!("{}", params),
+                        None => println!("No SFDP header found. Check flash supports SFDP."),
+                    }
+                    if !quiet { println!("Reading status registers...") };
+                    let status1 = flash.read_status1()?;
+                    let status2 = flash.read_status2()?;
+                    let status3 = flash.read_status3()?;
+                    println!("Status 1: 0x{:02X}, status 2: 0x{:02X}, status 3: 0x{:02X}",
+                             status1.0, status2.0, status3.0);
+                    let (bp0, bp1, bp2) = status1.get_block_protect();
+                    let sec = status1.get_sec();
+                    let tb = status1.get_tb();
+                    println!("BP0: {}, BP1: {}, BP2: {}, SEC: {}, TB: {}", bp0, bp1, bp2, sec, tb);
                 },
                 Some("erase") => {
-                    if !quiet { println!("Erasing flash...") };
-                    flash.chip_erase()?;
-                    if !quiet { println!("Flash erased.") };
+                    if quiet {
+                        flash.erase()?;
+                    } else {
+                        flash.erase_progress()?;
+                    }
                 },
                 Some("write") => {
                     let matches = matches.subcommand_matches("write").unwrap();
@@ -265,20 +285,39 @@ fn main() -> anyhow::Result<()> {
                     let length = if matches.is_present("length") {
                         value_t!(matches, "length", usize).unwrap()
                     } else {
-                        //flash.detect_capacity()?
-                        0
+                        log::info!("No length specified, autodetecting");
+                        if let Some(capacity) = flash.capacity() {
+                            capacity
+                        } else {
+                            println!("Could not detect flash capacity; specify --length instead.");
+                            return Ok(());
+                        }
                     };
                     let mut file = File::create(path)?;
-                    if !quiet { println!("Reading flash...") };
-                    let data = flash.read(offset, length)?;
+                    flash.read_params()?;
+                    let data = if quiet {
+                        flash.read(offset, length)?
+                    } else {
+                        flash.read_progress(offset, length)?
+                    };
                     file.write_all(&data)?;
-                    if !quiet { println!("Flash read.") };
+                },
+                Some("protect") => {
+                    if !quiet { println!("Setting block protection bits...") };
+                    // Read SFDP parameters in case they have instructions for
+                    // the non-volatile status register write.
+                    flash.read_params()?;
+                    flash.protect(true, true, true)?;
+                    if !quiet { println!("All block protection bits set.") };
                 },
                 Some("unprotect") => {
                     if !quiet { println!("Disabling flash write protection...") };
+                    // Read SFDP parameters in case they have instructions for
+                    // the non-volatile status register write.
+                    flash.read_params()?;
                     flash.unprotect()?;
                     if !quiet { println!("Flash protected disabled.") };
-                }
+                },
                 _ => panic!("Unhandled flash subcommand."),
             }
         },

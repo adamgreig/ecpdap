@@ -237,7 +237,7 @@ impl JTAG {
 
     /// Move to Shift-IR, write `tdi` to IR, then enter Update-IR.
     pub fn write_ir(&mut self, tdi: &[bool]) -> Result<()> {
-        log::debug!("Writing to IR: {:02X?}", bits_to_bytes(tdi));
+        log::trace!("Writing to IR: {:02X?}", bits_to_bytes(tdi));
         self.enter_shift_ir()?;
         self.write(tdi, true)?;
         self.enter_update_ir()?;
@@ -258,7 +258,7 @@ impl JTAG {
     /// Move to Shift-IR, write `tdi` to IR while capturing TDO, then enter Update-IR.
     /// Returns the captured bits from TDO.
     pub fn exchange_ir(&mut self, tdi: &[bool]) -> Result<Vec<bool>> {
-        log::debug!("Exchanging with IR: {:02X?}", bits_to_bytes(tdi));
+        log::trace!("Exchanging with IR: {:02X?}", bits_to_bytes(tdi));
         self.enter_shift_ir()?;
         let tdo = self.exchange(tdi, true)?;
         log::trace!("Exchanged from IR: {:02X?}", bits_to_bytes(&tdo));
@@ -268,7 +268,7 @@ impl JTAG {
 
     /// Move to Shift-DR, write `tdi` to DR, enter Update-DR.
     pub fn write_dr(&mut self, tdi: &[bool]) -> Result<()> {
-        log::debug!("Writing to DR: {:02X?}", bits_to_bytes(tdi));
+        log::trace!("Writing to DR: {:02X?}", bits_to_bytes(tdi));
         self.enter_shift_dr()?;
         self.write(tdi, true)?;
         self.enter_update_dr()?;
@@ -277,7 +277,7 @@ impl JTAG {
 
     /// Move to Shift-DR, write `tdi` to DR, remain in Shift-DR.
     pub fn write_dr_and_stay(&mut self, tdi: &[bool]) -> Result<()> {
-        log::debug!("Writing to DR: {:02X?}", bits_to_bytes(tdi));
+        log::trace!("Writing to DR: {:02X?}", bits_to_bytes(tdi));
         self.enter_shift_dr()?;
         self.write(tdi, false)?;
         Ok(())
@@ -286,7 +286,7 @@ impl JTAG {
     /// Move to Shift-DR, read `n` bits of DR while writing 0xFF.
     /// Returns the captured bits from TDO.
     pub fn read_dr(&mut self, n: usize) -> Result<Vec<bool>> {
-        log::debug!("Reading from DR...");
+        log::trace!("Reading from DR...");
         self.enter_shift_dr()?;
         let tdo = self.read(n, true)?;
         self.enter_update_dr()?;
@@ -297,7 +297,7 @@ impl JTAG {
     /// Move to Shift-DR, write `tdi` to DR while capturing TDO.
     /// Returns the captured bits from TDO.
     pub fn exchange_dr(&mut self, tdi: &[bool]) -> Result<Vec<bool>> {
-        log::debug!("Exchanging with DR: {:02X?}", bits_to_bytes(tdi));
+        log::trace!("Exchanging with DR: {:02X?}", bits_to_bytes(tdi));
         self.enter_shift_dr()?;
         let tdo = self.exchange(tdi, true)?;
         self.enter_update_dr()?;
