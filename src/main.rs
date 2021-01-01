@@ -274,9 +274,11 @@ fn main() -> anyhow::Result<()> {
                     let mut file = File::open(path)?;
                     let mut data = Vec::new();
                     file.read_to_end(&mut data)?;
-                    if !quiet { println!("Programming flash...") };
-                    flash.program(offset, &data, verify)?;
-                    if !quiet { println!("Flash programmed.") };
+                    if quiet {
+                        flash.program(offset, &data, verify)?;
+                    } else {
+                        flash.program_progress(offset, &data, verify)?;
+                    }
                 },
                 Some("read") => {
                     let matches = matches.subcommand_matches("read").unwrap();

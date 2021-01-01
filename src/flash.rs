@@ -18,6 +18,8 @@ pub enum Error {
     NoResetInstruction,
     #[error("No erase instruction has been specified.")]
     NoEraseInstruction,
+    #[error("No page size has been specified.")]
+    NoPageSize,
 
     #[error(transparent)]
     Access(#[from] anyhow::Error),
@@ -74,6 +76,10 @@ pub struct Flash<'a, A: FlashAccess> {
     /// This is set to 0x20 by default but may be overridden.
     erase_opcode: u8,
 }
+
+const DATA_PROGRESS_TPL: &'static str =
+    " {msg} [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}; {eta_precise})";
+const DATA_PROGRESS_CHARS: &'static str = "=> ";
 
 impl<'a, A: FlashAccess> Flash<'a, A> {
     /// Create a new Flash instance using the given FlashAccess provider.
@@ -295,8 +301,8 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
     /// try using `legacy_read()` instead.
     pub fn read(&mut self, address: u32, length: usize) -> Result<Vec<u8>> {
         self.check_address_length(address, length)?;
-        let length = length + 1;
         let mut param = self.make_address(address);
+        // Dummy byte after address.
         param.push(0);
         self.exchange(Command::FastRead, &param, length)
     }
@@ -314,8 +320,11 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
 
     /// Read `length` bytes of data from the attached flash, starting at `address`.
     ///
-    /// This method is identical to the `read()` method, except it calls the provided
+    /// This method is similar to the `read()` method, except it calls the provided
     /// callback function at regular intervals with the number of bytes read so far.
+    ///
+    /// While `read()` performs a single long SPI exchange, this method performs
+    /// up to 128 separate SPI exchanges to allow progress to be reported.
     pub fn read_cb<F: Fn(usize)>(&mut self, address: u32, length: usize, cb: F)
         -> Result<Vec<u8>>
     {
@@ -338,12 +347,14 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
 
     /// Read `length` bytes of data from the attached flash, starting at `address`.
     ///
-    /// This method is identical to the `read()` method, except it renders a progress
+    /// This method is similar to the `read()` method, except it renders a progress
     /// bar to the terminal during the read.
+    ///
+    /// While `read()` performs a single long SPI exchange, this method performs
+    /// up to 128 separate SPI exchanges to allow progress to be reported.
     pub fn read_progress(&mut self, address: u32, length: usize) -> Result<Vec<u8>> {
         let pb = ProgressBar::new(length as u64).with_style(ProgressStyle::default_bar()
-            .template(" {msg} [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}; {eta})")
-            .progress_chars("=> "));
+            .template(DATA_PROGRESS_TPL).progress_chars(DATA_PROGRESS_CHARS));
         pb.set_message("Reading");
         let result = self.read_cb(address, length, |n| pb.set_position(n as u64));
         pb.finish();
@@ -411,12 +422,66 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
     /// automatically set when SFDP parameters are read.
     pub fn program(&mut self, address: u32, data: &[u8], verify: bool) -> Result<()> {
         self.check_address_length(address, data.len())?;
+
+        // Work out a good erasure plan.
         let erase_plan = self.make_erase_plan(address, data.len())?;
-        self.erase_for_data(address, data.len())?;
-        self.program_data(address, data)?;
+
+        // Read data which will be inadvertently erased so we can restore it.
+        let full_data = self.make_restore_data(address, data, &erase_plan)?;
+
+        // Execute erasure plan.
+        self.run_erase_plan(&erase_plan, |_| {})?;
+
+        // Write new data.
+        let start_addr = erase_plan.0[0].2;
+        self.program_data(start_addr, &full_data)?;
+
+        // Optionally do a readback to verify all written data.
         if verify {
-            let programmed = self.read(address, data.len())?;
-            if programmed == data {
+            let programmed = self.read(start_addr, full_data.len())?;
+            if programmed == full_data {
+                Ok(())
+            } else {
+                Err(Error::ReadbackError)
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Program the attached flash with `data` starting at `address`.
+    ///
+    /// This is identical to `program()`, except it also draws progress bars to the terminal.
+    pub fn program_progress(&mut self, address: u32, data: &[u8], verify: bool) -> Result<()> {
+        self.check_address_length(address, data.len())?;
+
+        // Work out a good erasure plan.
+        let erase_plan = self.make_erase_plan(address, data.len())?;
+
+        // Read data which will be inadvertently erased so we can restore it.
+        let full_data = self.make_restore_data(address, data, &erase_plan)?;
+
+        // Execute erasure plan.
+        let erase_size = erase_plan.total_size() as u64;
+        let pb = ProgressBar::new(erase_size).with_style(ProgressStyle::default_bar()
+            .template(DATA_PROGRESS_TPL).progress_chars(DATA_PROGRESS_CHARS));
+        pb.set_message("Erasing");
+        self.run_erase_plan(&erase_plan, |n| pb.set_position(n as u64))?;
+        pb.finish();
+
+        // Write new data.
+        let start_addr = erase_plan.0[0].2;
+        let erase_size = erase_plan.total_size() as u64;
+        let pb = ProgressBar::new(erase_size).with_style(ProgressStyle::default_bar()
+            .template(DATA_PROGRESS_TPL).progress_chars(DATA_PROGRESS_CHARS));
+        pb.set_message("Writing");
+        self.program_data_cb(start_addr, &full_data, |n| pb.set_position(n as u64))?;
+        pb.finish();
+
+        // Optionally do a readback to verify all written data.
+        if verify {
+            let programmed = self.read_progress(start_addr, full_data.len())?;
+            if programmed == full_data {
                 Ok(())
             } else {
                 Err(Error::ReadbackError)
@@ -531,71 +596,84 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
         Ok(data[0])
     }
 
-    fn erase_for_data(&mut self, address: u32, length: usize) -> Result<()> {
-        // Adjust length and address to be 64K aligned
-        const BLOCK_SIZE: usize = 64 * 1024;
-        let length = length + (address as usize % BLOCK_SIZE) as usize;
-        let address = address & 0xFF0000;
-        let mut n_blocks = length / BLOCK_SIZE;
-        if length % BLOCK_SIZE != 0 { n_blocks += 1 };
-        for block in 0..n_blocks {
-            self.write_enable()?;
-            self.block_erase_2(address + (block * BLOCK_SIZE) as u32)?;
-            self.wait_while_busy()?;
-        }
-        Ok(())
+    /// Program `data` to `address`, automatically split into multiple page program operations.
+    ///
+    /// Note that this does *not* erase the flash beforehand; use `program()` for a higher-level
+    /// erase-program-verify interface.
+    pub fn program_data(&mut self, address: u32, data: &[u8]) -> Result<()> {
+        self.program_data_cb(address, data, |_| {})
     }
 
-    fn program_data(&mut self, address: u32, data: &[u8]) -> Result<()> {
-        // Pad to obtain page alignment
-        const PAGE_SIZE: usize = 256;
-        let pad_length = address as usize % PAGE_SIZE;
-        let tx = if pad_length != 0 {
-            let mut tx = vec![0xFF; pad_length];
-            tx.extend(data);
-            tx
-        } else {
-            data.to_vec()
+    /// Program `data` to `address`, automatically split into multiple page program operations.
+    ///
+    /// Note that this does *not* erase the flash beforehand;
+    /// use `program()` for a higher-level erase-program-verify interface.
+    ///
+    /// Calls `cb` with the number of bytes programmed so far after each
+    /// page programming operation.
+    pub fn program_data_cb<F: Fn(usize)>(&mut self, address: u32, mut data: &[u8], cb: F)
+        -> Result<()>
+    {
+        let page_size = match self.page_size {
+            Some(page_size) => page_size,
+            None => {
+                log::error!("No page size available. Set one with `set_page_size()`.");
+                return Err(Error::NoPageSize);
+            }
         };
-        let address = address & 0xFFFF00;
 
-        // Write pages
-        for (idx, page_data) in tx.chunks(PAGE_SIZE).enumerate() {
+        log::trace!("Programming data to 0x{:08X}, page size {} bytes", address, page_size);
+
+        let mut total_bytes = 0;
+        cb(total_bytes);
+
+        // If the address is not page-aligned, we need to do a
+        // smaller-than-page-size initial program.
+        let first_write = page_size - ((address as usize) % page_size);
+        if first_write != page_size {
+            log::trace!("Programming partial first page of {} bytes", first_write);
             self.write_enable()?;
-            self.page_program(address + (idx*PAGE_SIZE) as u32, page_data)?;
+            self.page_program(address, &data[..first_write])?;
             self.wait_while_busy()?;
+            total_bytes += first_write;
+            data = &data[first_write..];
+            cb(total_bytes);
         }
+
+        for page_data in data.chunks(page_size) {
+            self.write_enable()?;
+            self.page_program(address + total_bytes as u32, page_data)?;
+            self.wait_while_busy()?;
+            total_bytes += page_data.len();
+            cb(total_bytes);
+        }
+
         Ok(())
     }
 
     /// Send the WriteEnable command, setting the WEL in the status register.
-    fn write_enable(&mut self) -> Result<()> {
+    pub fn write_enable(&mut self) -> Result<()> {
         self.command(Command::WriteEnable)
     }
 
-    fn page_program(&mut self, address: u32, data: &[u8]) -> Result<()> {
-        assert!(!data.is_empty(), "Cannot program 0 bytes of data");
-        assert!(data.len() <= 256, "Cannot program more than 256 bytes per page");
-        let mut tx = address.to_be_bytes()[1..].to_vec();
+    /// Program up to one page of data.
+    ///
+    /// This method sets the write-enable latch and then waits for programming to complete,
+    /// including sleeping half the typical page program time if known before polling.
+    ///
+    /// Note that this does *not* erase the flash beforehand;
+    /// use `program()` for a higher-level erase-program-verify interface.
+    pub fn page_program(&mut self, address: u32, data: &[u8]) -> Result<()> {
+        let mut tx = self.make_address(address);
         tx.extend(data);
+        self.write_enable()?;
         self.exchange(Command::PageProgram, &tx, 0)?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn block_erase_1(&mut self, address: u32) -> Result<()> {
-        self.exchange(Command::BlockErase1, &address.to_be_bytes()[1..], 0)?;
-        Ok(())
-    }
-
-    fn block_erase_2(&mut self, address: u32) -> Result<()> {
-        self.exchange(Command::BlockErase2, &address.to_be_bytes()[1..], 0)?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn sector_erase(&mut self, address: u32) -> Result<()> {
-        self.exchange(Command::SectorErase, &address.to_be_bytes()[1..], 0)?;
+        if let Some(params) = self.params {
+            if let Some(timing) = params.timing {
+                std::thread::sleep(timing.page_prog_time_typ / 2);
+            }
+        }
+        self.wait_while_busy()?;
         Ok(())
     }
 
@@ -760,7 +838,7 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
     }
 
     /// Writes `command` and `data` to the flash memory, then returns `nbytes` of response.
-    fn exchange<C: Into<u8>>(&mut self, command: C, data: &[u8], nbytes: usize)
+    pub fn exchange<C: Into<u8>>(&mut self, command: C, data: &[u8], nbytes: usize)
         -> Result<Vec<u8>>
     {
         let mut tx = vec![command.into()];
@@ -773,7 +851,7 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
     }
 
     /// Writes `command` and `data` to the flash memory, without reading the response.
-    fn write<C: Into<u8>>(&mut self, command: C, data: &[u8]) -> Result<()> {
+    pub fn write<C: Into<u8>>(&mut self, command: C, data: &[u8]) -> Result<()> {
         let mut tx = vec![command.into()];
         tx.extend(data);
         log::trace!("SPI write: {:02X?}", &tx);
@@ -782,7 +860,7 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
     }
 
     /// Convenience method for issuing a single command and not caring about the returned data
-    fn command<C: Into<u8>>(&mut self, command: C) -> Result<()> {
+    pub fn command<C: Into<u8>>(&mut self, command: C) -> Result<()> {
         self.write(command, &[])?;
         Ok(())
     }
@@ -833,26 +911,26 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
         // Find available erase instructions.
         if let Some(params) = self.params {
             if params.erase_insts.iter().any(|&inst| inst.is_some()) {
-                log::debug!("Using SFDP erase instructions.");
+                log::trace!("Using SFDP erase instructions.");
                 for inst in params.erase_insts.iter() {
                     if let Some(inst) = inst {
-                        insts.push((inst.size as usize, inst.opcode));
+                        insts.push((inst.size as usize, inst.opcode, inst.time_typ));
                     }
                 }
             } else if params.legacy_4kb_erase_supported {
-                log::debug!("No erase instructions in SFDP, using legacy 4kB erase.");
-                insts.push((4096, params.legacy_4kb_erase_inst));
+                log::trace!("No erase instructions in SFDP, using legacy 4kB erase.");
+                insts.push((4096, params.legacy_4kb_erase_inst, None));
             } else {
-                log::debug!("SFDP indicates no erase instructions available.");
+                log::trace!("SFDP indicates no erase instructions available.");
             }
         }
         if insts.is_empty() {
             if let Some(erase_size) = self.erase_size {
-                log::debug!("No SFDP erase instructions found, using `erase_size` parameter.");
-                insts.push((erase_size, self.erase_opcode));
+                log::trace!("No SFDP erase instructions found, using `erase_size` parameter.");
+                insts.push((erase_size, self.erase_opcode, None));
             } else {
-                log::debug!("No erase instructions could be found.");
-                log::debug!("Try setting one manually using `Flash::set_erase_size()`.");
+                log::warn!("No erase instructions could be found.");
+                log::warn!("Try setting one manually using `Flash::set_erase_size()`.");
                 return Err(Error::NoEraseInstruction);
             }
         }
@@ -860,6 +938,87 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
 
         // Create plan given the list of available erase instructions.
         Ok(ErasePlan::new(&insts, address as usize, length))
+    }
+
+    /// Read all the bytes before `address` in memory which will be erased by `plan`.
+    ///
+    /// If all those bytes are 0xFF, returns an empty Vec instead, as they won't be changed
+    /// by the erase operation.
+    fn read_erase_preamble(&mut self, address: u32, plan: &ErasePlan) -> Result<Vec<u8>> {
+        let base = plan.0[0].2;
+        let len = address - base;
+        if len > 0 {
+            log::debug!("Reading erase preamble: base={} len={}", base, len);
+            let data = self.read(base, len as usize)?;
+            // If all the preamble is already 0xFF, there's no point reprogramming it.
+            if data.iter().all(|x| *x == 0xFF) {
+                Ok(Vec::new())
+            } else {
+                Ok(data)
+            }
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Read all the bytes after `address + length` in memory which will be erased by `plan`.
+    ///
+    /// If all those bytes are 0xFF, returns an empty Vec instead, as they won't be changed
+    /// by the erase operation.
+    fn read_erase_postamble(&mut self, address: u32, length: usize, plan: &ErasePlan)
+        -> Result<Vec<u8>>
+    {
+        let (_, size, base, _) = plan.0.last().unwrap();
+        let start = address + (length as u32);
+        let len = (*base as usize + *size) - start as usize;
+        if len > 0 {
+            log::debug!("Reading erase postamble: addr={} len={}", start, len);
+            let data = self.read(start, len)?;
+            // If all the postamble is already 0xFF, there's no point reprogramming it.
+            if data.iter().all(|x| *x == 0xFF) {
+                Ok(Vec::new())
+            } else {
+                Ok(data)
+            }
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Extend `data` by adding any preamble and postamble required to preserve
+    /// existing data after erasing and reprogramming.
+    fn make_restore_data(&mut self, address: u32, data: &[u8], erase_plan: &ErasePlan)
+        -> Result<Vec<u8>>
+    {
+        let preamble = self.read_erase_preamble(address, &erase_plan)?;
+        let postamble = self.read_erase_postamble(address, data.len(), &erase_plan)?;
+        let mut full_data = preamble;
+        full_data.extend(data);
+        full_data.extend(&postamble);
+        Ok(full_data)
+    }
+
+    /// Execute the sequence of erase operations from `plan`.
+    ///
+    /// `cb` is called with the number of bytes erased so far.
+    fn run_erase_plan<F: Fn(usize)>(&mut self, plan: &ErasePlan, cb: F) -> Result<()> {
+        let mut total_erased = 0;
+        cb(total_erased);
+        for (opcode, size, base, duration) in plan.0.iter() {
+            log::trace!("Executing erase plan: Erase 0x{:02X} ({} bytes) from 0x{:08X}",
+                        opcode, size, base);
+            let addr = self.make_address(*base);
+            self.write_enable()?;
+            self.write(*opcode, &addr)?;
+            if let Some(duration) = duration {
+                std::thread::sleep(*duration / 2);
+            }
+            self.wait_while_busy()?;
+            total_erased += size;
+            cb(total_erased);
+        }
+        cb(total_erased);
+        Ok(())
     }
 }
 
@@ -1610,21 +1769,70 @@ impl StatusRegister3 {
     }
 }
 
+/// Erase plan of (opcode, size, base address, typical duration) to erase a range of memory.
 #[derive(Clone, Debug)]
-struct ErasePlan {
-    opcodes: Vec<u8>,
-    sizes: Vec<usize>,
-    addresses: Vec<u32>,
-}
+struct ErasePlan(Vec<(u8, usize, u32, Option<Duration>)>);
 
 impl ErasePlan {
-    fn new(insts: &[(usize, u8)], start: usize, length: usize) -> Self {
-        log::trace!("Creating erase plan, instructions: {:?}, start {}, length {}",
-                    insts, start, length);
-        let mut opcodes = Vec::new();
-        let mut sizes = Vec::new();
-        let mut addresses = Vec::new();
+    fn new(insts: &[(usize, u8, Option<Duration>)], start: usize, length: usize) -> Self {
+        log::trace!("Creating erase plan, start={} length={}", start, length);
+        let mut plan = Vec::new();
 
-        ErasePlan { opcodes, sizes, addresses }
+        // Sort instructions by smallest area of effect first.
+        let mut insts = insts.to_vec();
+        insts.sort();
+
+        // We compute the number of useful bytes erased for each operation,
+        // then from those with the same maximum number of useful bytes erased,
+        // we select the smallest operation, and repeat until all bytes are erased.
+        let end = start + length;
+        let mut pos = start;
+        while pos < end {
+            log::trace!("Evaluating candidates, pos={} end={}", pos, end);
+            // Current candidate, (bytes, size, opcode, base).
+            let mut candidate = (0, usize::MAX, 0, 0, None);
+            for (erase_size, opcode, duration) in insts.iter() {
+                let erase_base = pos - (pos % erase_size);
+                let erase_end = erase_base + erase_size - 1;
+                let mut bytes = erase_size - (pos - erase_base);
+                if erase_end > end {
+                    bytes -= erase_end - end;
+                }
+                log::trace!("  Candidate 0x{:02X} ({} bytes): base={} end={} bytes={}",
+                            opcode, erase_size, erase_base, erase_end, bytes);
+                if bytes > candidate.0 || (bytes == candidate.0 && *erase_size < candidate.1) {
+                    candidate = (bytes, *erase_size, *opcode, erase_base, *duration);
+                }
+            }
+
+            log::trace!("Candidate selected: {:?}", candidate);
+            pos += candidate.0;
+            plan.push((candidate.2, candidate.1, candidate.3 as u32, candidate.4));
+        }
+
+        log::debug!("Erase plan: {:?}", plan);
+
+        ErasePlan(plan)
     }
+
+    fn total_size(&self) -> usize {
+        self.0.iter().map(|x| x.1).sum()
+    }
+}
+
+#[test]
+fn test_erase_plan() {
+    let insts = &[(4, 1), (32, 2), (64, 3)];
+    // Use a single 64kB erase to erase an aligned 64kB block.
+    assert_eq!(ErasePlan::new(insts, 0, 64).0, vec![(3, 64, 0)]);
+    // Use three 64kB erases to erase an aligned 192kB block.
+    assert_eq!(ErasePlan::new(insts, 0, 192).0, vec![(3, 64, 0), (3, 64, 64), (3, 64, 128)]);
+    // Use 64kB followed by 32kB to erase an aligned 70kB block.
+    assert_eq!(ErasePlan::new(insts, 0, 70).0, vec![(3, 64, 0), (2, 32, 64)]);
+    // Use 64kB followed by 4kB to erase an aligned 66kB block.
+    assert_eq!(ErasePlan::new(insts, 0, 66).0, vec![(3, 64, 0), (1, 4, 64)]);
+    // Use 4kB followed by 64kB to erase a misaligned 64kB block.
+    assert_eq!(ErasePlan::new(insts, 62, 64).0, vec![(1, 4, 60), (3, 64, 64)]);
+    // Use a 4kB, 64kB, 4kB to erase a misaligned 68kB block.
+    assert_eq!(ErasePlan::new(insts, 62, 68).0, vec![(1, 4, 60), (3, 64, 64), (1, 4, 128)]);
 }
