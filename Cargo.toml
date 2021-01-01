@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Adam Greig <adam@adamgreig.com>"]
 edition = "2018"
 repository = "https://github.com/adamgreig/ecpdap"
-license = "apache-2.0 OR MIT"
+license = "Apache-2.0 OR MIT"
 description = "Program ECP5 FPGAs using CMSIS-DAP probes"
 
 [dependencies]
