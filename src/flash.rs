@@ -77,9 +77,9 @@ pub struct Flash<'a, A: FlashAccess> {
     erase_opcode: u8,
 }
 
-const DATA_PROGRESS_TPL: &'static str =
+const DATA_PROGRESS_TPL: &str =
     " {msg} [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}; {eta_precise})";
-const DATA_PROGRESS_CHARS: &'static str = "=> ";
+const DATA_PROGRESS_CHARS: &str = "=> ";
 
 impl<'a, A: FlashAccess> Flash<'a, A> {
     /// Create a new Flash instance using the given FlashAccess provider.
@@ -442,6 +442,7 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
             if programmed == full_data {
                 Ok(())
             } else {
+                log::error!("Readback verification failed. Check flash protection bits.");
                 Err(Error::ReadbackError)
             }
         } else {
@@ -462,21 +463,11 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
         let full_data = self.make_restore_data(address, data, &erase_plan)?;
 
         // Execute erasure plan.
-        let erase_size = erase_plan.total_size() as u64;
-        let pb = ProgressBar::new(erase_size).with_style(ProgressStyle::default_bar()
-            .template(DATA_PROGRESS_TPL).progress_chars(DATA_PROGRESS_CHARS));
-        pb.set_message("Erasing");
-        self.run_erase_plan(&erase_plan, |n| pb.set_position(n as u64))?;
-        pb.finish();
+        self.run_erase_plan_progress(&erase_plan)?;
 
         // Write new data.
         let start_addr = erase_plan.0[0].2;
-        let erase_size = erase_plan.total_size() as u64;
-        let pb = ProgressBar::new(erase_size).with_style(ProgressStyle::default_bar()
-            .template(DATA_PROGRESS_TPL).progress_chars(DATA_PROGRESS_CHARS));
-        pb.set_message("Writing");
-        self.program_data_cb(start_addr, &full_data, |n| pb.set_position(n as u64))?;
-        pb.finish();
+        self.program_data_progress(start_addr, &full_data)?;
 
         // Optionally do a readback to verify all written data.
         if verify {
@@ -484,6 +475,7 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
             if programmed == full_data {
                 Ok(())
             } else {
+                log::error!("Readback verification failed. Check flash protection bits.");
                 Err(Error::ReadbackError)
             }
         } else {
@@ -604,10 +596,24 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
         self.program_data_cb(address, data, |_| {})
     }
 
-    /// Program `data` to `address`, automatically split into multiple page program operations.
+    /// Program `data` to `address`, automatically split into multiple page program operations,
+    /// and draws a progress bar to the terminal.
     ///
     /// Note that this does *not* erase the flash beforehand;
     /// use `program()` for a higher-level erase-program-verify interface.
+    pub fn program_data_progress(&mut self, address: u32, data: &[u8]) -> Result<()> {
+        let pb = ProgressBar::new(data.len() as u64).with_style(ProgressStyle::default_bar()
+            .template(DATA_PROGRESS_TPL).progress_chars(DATA_PROGRESS_CHARS));
+        pb.set_message("Writing");
+        self.program_data_cb(address, &data, |n| pb.set_position(n as u64))?;
+        pb.finish();
+        Ok(())
+    }
+
+    /// Program `data` to `address`, automatically split into multiple page program operations.
+    ///
+    /// Note that this does *not* erase the flash beforehand; use `program()` for a higher-level
+    /// erase-program-verify interface.
     ///
     /// Calls `cb` with the number of bytes programmed so far after each
     /// page programming operation.
@@ -1020,6 +1026,19 @@ impl<'a, A: FlashAccess> Flash<'a, A> {
         cb(total_erased);
         Ok(())
     }
+
+    /// Execute the sequence of erase operations from `plan`, and draw a progress bar
+    /// to the terminal.
+    fn run_erase_plan_progress(&mut self, plan: &ErasePlan) -> Result<()> {
+        let erase_size = plan.total_size() as u64;
+        let pb = ProgressBar::new(erase_size).with_style(ProgressStyle::default_bar()
+            .template(DATA_PROGRESS_TPL).progress_chars(DATA_PROGRESS_CHARS));
+        pb.set_message("Erasing");
+        self.run_erase_plan(&plan, |n| pb.set_position(n as u64))?;
+        pb.finish();
+        Ok(())
+    }
+
 }
 
 /// Store the ID read off an SPI flash memory.
@@ -1822,17 +1841,23 @@ impl ErasePlan {
 
 #[test]
 fn test_erase_plan() {
-    let insts = &[(4, 1), (32, 2), (64, 3)];
+    let insts = &[(4, 1, None), (32, 2, None), (64, 3, None)];
     // Use a single 64kB erase to erase an aligned 64kB block.
-    assert_eq!(ErasePlan::new(insts, 0, 64).0, vec![(3, 64, 0)]);
+    assert_eq!(ErasePlan::new(insts, 0, 64).0,
+               vec![(3, 64, 0, None)]);
     // Use three 64kB erases to erase an aligned 192kB block.
-    assert_eq!(ErasePlan::new(insts, 0, 192).0, vec![(3, 64, 0), (3, 64, 64), (3, 64, 128)]);
+    assert_eq!(ErasePlan::new(insts, 0, 192).0,
+               vec![(3, 64, 0, None), (3, 64, 64, None), (3, 64, 128, None)]);
     // Use 64kB followed by 32kB to erase an aligned 70kB block.
-    assert_eq!(ErasePlan::new(insts, 0, 70).0, vec![(3, 64, 0), (2, 32, 64)]);
+    assert_eq!(ErasePlan::new(insts, 0, 70).0,
+               vec![(3, 64, 0, None), (2, 32, 64, None)]);
     // Use 64kB followed by 4kB to erase an aligned 66kB block.
-    assert_eq!(ErasePlan::new(insts, 0, 66).0, vec![(3, 64, 0), (1, 4, 64)]);
+    assert_eq!(ErasePlan::new(insts, 0, 66).0,
+               vec![(3, 64, 0, None), (1, 4, 64, None)]);
     // Use 4kB followed by 64kB to erase a misaligned 64kB block.
-    assert_eq!(ErasePlan::new(insts, 62, 64).0, vec![(1, 4, 60), (3, 64, 64)]);
+    assert_eq!(ErasePlan::new(insts, 62, 64).0,
+               vec![(1, 4, 60, None), (3, 64, 64, None)]);
     // Use a 4kB, 64kB, 4kB to erase a misaligned 68kB block.
-    assert_eq!(ErasePlan::new(insts, 62, 68).0, vec![(1, 4, 60), (3, 64, 64), (1, 4, 128)]);
+    assert_eq!(ErasePlan::new(insts, 62, 68).0,
+               vec![(1, 4, 60, None), (3, 64, 64, None), (1, 4, 128, None)]);
 }
