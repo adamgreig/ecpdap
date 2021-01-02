@@ -36,6 +36,8 @@ pub struct DAP {
 
 impl DAP {
     pub fn new(probe: Probe) -> Result<DAP> {
+        probe.drain()?;
+
         let mut dap = DAP { probe, packet_size: 0 };
 
         if !dap.has_jtag()? {
