@@ -432,18 +432,14 @@ impl FlashAccess for ECP5Flash {
     fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
         let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
         let bits = bytes_to_bits(&data, data.len() * 8)?;
-        self.ecp5.tap.run_test_idle(0)?;
         self.ecp5.tap.write_dr(&bits)?;
-        self.ecp5.tap.run_test_idle(0)?;
         Ok(())
     }
 
     fn exchange(&mut self, data: &[u8]) -> anyhow::Result<Vec<u8>> {
         let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
         let bits = bytes_to_bits(&data, data.len() * 8)?;
-        self.ecp5.tap.run_test_idle(0)?;
         let result = self.ecp5.tap.exchange_dr(&bits)?;
-        self.ecp5.tap.run_test_idle(0)?;
         let result = bits_to_bytes(&result);
         let result: Vec<u8> = result.iter().map(|x| x.reverse_bits()).collect();
         Ok(result)

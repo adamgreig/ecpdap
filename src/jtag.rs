@@ -266,12 +266,11 @@ impl JTAG {
         Ok(tdo)
     }
 
-    /// Move to Shift-DR, write `tdi` to DR, enter Update-DR.
+    /// Move to Shift-DR, write `tdi` to DR, then enter Exit1-DR.
     pub fn write_dr(&mut self, tdi: &[bool]) -> Result<()> {
         log::trace!("Writing to DR: {:02X?}", bits_to_bytes(tdi));
         self.enter_shift_dr()?;
         self.write(tdi, true)?;
-        self.enter_update_dr()?;
         Ok(())
     }
 
@@ -283,24 +282,22 @@ impl JTAG {
         Ok(())
     }
 
-    /// Move to Shift-DR, read `n` bits of DR while writing 0xFF.
+    /// Move to Shift-DR, read `n` bits of DR while writing 0xFF, then enter Exit1-DR.
     /// Returns the captured bits from TDO.
     pub fn read_dr(&mut self, n: usize) -> Result<Vec<bool>> {
         log::trace!("Reading from DR...");
         self.enter_shift_dr()?;
         let tdo = self.read(n, true)?;
-        self.enter_update_dr()?;
         log::trace!("Read from DR: {:02X?}", bits_to_bytes(&tdo));
         Ok(tdo)
     }
 
-    /// Move to Shift-DR, write `tdi` to DR while capturing TDO.
+    /// Move to Shift-DR, write `tdi` to DR while capturing TDO, then enter Exit1-DR.
     /// Returns the captured bits from TDO.
     pub fn exchange_dr(&mut self, tdi: &[bool]) -> Result<Vec<bool>> {
         log::trace!("Exchanging with DR: {:02X?}", bits_to_bytes(tdi));
         self.enter_shift_dr()?;
         let tdo = self.exchange(tdi, true)?;
-        self.enter_update_dr()?;
         log::trace!("Exchanged from DR: {:02X?}", bits_to_bytes(&tdo));
         Ok(tdo)
     }
@@ -727,7 +724,7 @@ impl JTAGTAP {
     }
 
     /// Move to Shift-DR and write `dr` to DR.
-    /// Exits Shift-DR and enters Update-DR once complete.
+    /// Exits Shift-DR and enters Exit1-DR once complete.
     pub fn write_dr(&mut self, dr: &[bool]) -> Result<()> {
         // Add dummy bits before and after our IR as required.
         let mut tdi = vec![true; self.dr_prefix];
@@ -750,7 +747,7 @@ impl JTAGTAP {
     }
 
     /// Move to Shift-DR, read `n` bits of DR while writing 0xFF.
-    /// Exits Shift-DR and enters Update-DR once complete.
+    /// Exits Shift-DR and enters Exit1-DR once complete.
     /// Returns the captured bits from TDO.
     pub fn read_dr(&mut self, n: usize) -> Result<Vec<bool>> {
         let tdo = self.jtag.read_dr(self.dr_prefix + n + self.dr_suffix)?;
@@ -759,7 +756,7 @@ impl JTAGTAP {
     }
 
     /// Move to Shift-DR, write `dr` to DR while capturing TDO.
-    /// Exits Shift-DR and enters Update-DR once complete.
+    /// Exits Shift-DR and enters Exit1-DR once complete.
     /// Returns the captured bits from TDO.
     pub fn exchange_dr(&mut self, dr: &[bool]) -> Result<Vec<bool>> {
         // Add dummy bits before and after our IR as required.

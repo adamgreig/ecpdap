@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+* Improve flash write performance by reducing JTAG state transitions.
+
 ## [v0.1.3] - 2021-01-02
 
 * Support CMSIS-DAPv1 probes with non-64-byte HID reports, such as MCU-Link.
