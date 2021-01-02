@@ -211,6 +211,7 @@ pub struct ProbeInfo {
     pub vid: u16,
     pub pid: u16,
     pub sn: Option<String>,
+    pub v1_only: bool,
 }
 
 impl ProbeInfo {
@@ -226,30 +227,40 @@ impl ProbeInfo {
     /// Create a ProbeInfo from a specifier string.
     pub fn from_specifier(spec: &str) -> Result<Self> {
         let parts: Vec<&str> = spec.split(':').collect();
-        if parts.len() < 2 || parts.len() > 3 {
+        if parts.len() < 2 || parts.len() > 4 {
             return Err(Error::InvalidSpecifier);
         }
         let vid = u16::from_str_radix(parts[0], 16).or(Err(Error::InvalidSpecifier))?;
         let pid = u16::from_str_radix(parts[1], 16).or(Err(Error::InvalidSpecifier))?;
-        let sn = if parts.len() == 3 { Some(parts[2].to_owned()) } else { None };
-        Ok(ProbeInfo { name: None, vid, pid, sn })
+        let sn = if parts.len() >= 3 { Some(parts[2].to_owned()) } else { None };
+        if parts.len() == 4 && parts[3] != "v1" {
+            return Err(Error::InvalidSpecifier);
+        }
+        let v1_only = parts.len() == 4 && parts[3] == "v1";
+        Ok(ProbeInfo { name: None, vid, pid, sn, v1_only })
     }
 
     /// Attempt to open a Probe corresponding to this ProbeInfo.
     pub fn open(&self) -> Result<Probe> {
         log::trace!("Opening probe: {}", self);
-        if let Ok(devices) = Context::new().and_then(|ctx| ctx.devices()) {
-            for device in devices.iter() {
-                match ProbeInfo::from_device(&device) {
-                    Some(info) => if info.matches(self) {
-                        if let Ok(probe) = Probe::from_device(device) {
-                            return Ok(probe);
-                        }
-                    },
-                    None => continue,
+
+        // Only attempt to open as a v2 device if v1_only is not true.
+        if !self.v1_only {
+            if let Ok(devices) = Context::new().and_then(|ctx| ctx.devices()) {
+                for device in devices.iter() {
+                    match ProbeInfo::from_device(&device) {
+                        Some(info) => if info.matches(self) {
+                            if let Ok(probe) = Probe::from_device(device) {
+                                return Ok(probe);
+                            }
+                        },
+                        None => continue,
+                    }
                 }
             }
         }
+
+        // Always attempt to open as a v1 device if opening as a v2 device fails.
         Probe::from_hid(self)
     }
 
@@ -270,6 +281,7 @@ impl ProbeInfo {
                 vid: desc.vendor_id(),
                 pid: desc.product_id(),
                 sn: sn_str,
+                v1_only: false,
             })
         } else {
             None
