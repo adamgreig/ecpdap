@@ -312,6 +312,15 @@ impl ECP5 {
         Ok(())
     }
 
+    /// Send the LSC_REFRESH command, triggering a reload of configuration.
+    ///
+    /// This is equivalent to toggling the PROGRAMN pin.
+    pub fn refresh(&mut self) -> Result<()> {
+        self.command(Command::LSC_REFRESH)?;
+        self.tap.run_test_idle(50)?;
+        Ok(())
+    }
+
     /// Place ECP5 into flash pass-through mode.
     /// The current SRAM contents are cleared.
     pub fn into_flash(mut self) -> Result<ECP5Flash> {

@@ -67,6 +67,8 @@ fn main() -> anyhow::Result<()> {
             .about("Scan JTAG chain and detect ECP5 IDCODEs"))
         .subcommand(SubCommand::with_name("reset")
             .about("Pulse the JTAG nRST line for 100ms"))
+        .subcommand(SubCommand::with_name("reload")
+            .about("Request the ECP5 reload its configuration"))
         .subcommand(SubCommand::with_name("program")
             .about("Program ECP5 SRAM with bitstream")
             .arg(Arg::with_name("file")
@@ -93,7 +95,10 @@ fn main() -> anyhow::Result<()> {
                 .arg(Arg::with_name("no-verify")
                      .help("Disable readback verification")
                      .short("n")
-                     .long("no-verify")))
+                     .long("no-verify"))
+                .arg(Arg::with_name("no-reload")
+                     .help("Don't request the ECP5 reload configuration after programming")
+                     .long("no-reload")))
             .subcommand(SubCommand::with_name("read")
                 .about("Read SPI flash contents to file")
                 .arg(Arg::with_name("file")
@@ -115,7 +120,7 @@ fn main() -> anyhow::Result<()> {
             )
         .get_matches();
 
-    pretty_env_logger::init();
+    pretty_env_logger::init_timed();
     let t0 = Instant::now();
     let quiet = matches.is_present("quiet");
 
@@ -218,6 +223,10 @@ fn main() -> anyhow::Result<()> {
 
     // We can finally handle 'program' and 'flash' commands.
     match matches.subcommand_name() {
+        Some("reload") => {
+            if !quiet { println!("Reloading ECP5 configuration...") };
+            ecp5.refresh()?;
+        },
         Some("program") => {
             let matches = matches.subcommand_matches("program").unwrap();
             let path = matches.value_of("file").unwrap();
@@ -270,10 +279,14 @@ fn main() -> anyhow::Result<()> {
                     }
                 },
                 Some("write") => {
+                    if !quiet && flash.is_protected()? {
+                        println!("Flash appears to be write-protected; writing may fail.");
+                    }
                     let matches = matches.subcommand_matches("write").unwrap();
                     let path = matches.value_of("file").unwrap();
                     let offset = value_t!(matches, "offset", u32).unwrap();
                     let verify = !matches.is_present("no-verify");
+                    let reload = !matches.is_present("no-reload");
                     let mut file = File::open(path)?;
                     let mut data = Vec::new();
                     file.read_to_end(&mut data)?;
@@ -281,6 +294,10 @@ fn main() -> anyhow::Result<()> {
                         flash.program(offset, &data, verify)?;
                     } else {
                         flash.program_progress(offset, &data, verify)?;
+                    }
+                    if reload {
+                        let mut ecp5 = ecp5_flash.release();
+                        ecp5.refresh()?;
                     }
                 },
                 Some("read") => {
