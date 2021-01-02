@@ -29,8 +29,6 @@ pub enum Error {
     InvalidIR,
     #[error("Invalid index: does not exist in JTAG scan chain.")]
     InvalidTAPIndex,
-    #[error("Attempted raw DR write with multiple TAPs in chain.")]
-    MultipleTAPs,
     #[error("Provided IR command was the wrong length for the TAP.")]
     WrongIRLength,
     #[error("Bit vector error")]
@@ -274,11 +272,25 @@ impl JTAG {
         Ok(())
     }
 
-    /// Move to Shift-DR, write `tdi` to DR, remain in Shift-DR.
-    pub fn write_dr_and_stay(&mut self, tdi: &[bool]) -> Result<()> {
+    /// Move to Shift-DR, write `tdi` to DR, then enter Exit1-DR.
+    ///
+    /// Additionally, call `cb` at regular intervals with the number of
+    /// bits written so far.
+    pub fn write_dr_cb<F: Fn(usize)>(&mut self, tdi: &[bool], cb: F) -> Result<()> {
         log::trace!("Writing to DR: {:02X?}", bits_to_bytes(tdi));
         self.enter_shift_dr()?;
-        self.write(tdi, false)?;
+
+        let mut total_bits = 0;
+        cb(total_bits);
+
+        let chunks = tdi.chunks(self.max_tdi_bits() * 10);
+        let len = chunks.len();
+        for (idx, chunk) in chunks.enumerate() {
+            self.write(chunk, idx == len - 1)?;
+            total_bits += chunk.len();
+            cb(total_bits);
+        }
+
         Ok(())
     }
 
@@ -459,6 +471,20 @@ impl JTAG {
         let data = &d0[..n];
         log::trace!("JTAG {} scan chain contents: {:02X?}", name, bits_to_bytes(data));
         Ok(data.to_vec())
+    }
+
+    /// Returns maximum number of TDI bits that can fit into a single DAP packet.
+    fn max_tdi_bits(&self) -> usize {
+        // Packet size minus two header bytes.
+        let bytes = self.dap.packet_size() - 2;
+        // As many 64-bit sequences as possible, 9 bytes each (1 byte header, 8 bytes data).
+        let full = bytes / 9;
+        // Mop up the rest, after another 1 byte header.
+        let remaining = bytes - (full * 9) - 1;
+        // Convert to bits.
+        let bits = (full * 64) + (remaining * 8);
+        log::trace!("Computed maximum TDI bits as {}", bits);
+        bits
     }
 }
 
@@ -651,18 +677,9 @@ impl JTAGTAP {
         self.chain.n_taps()
     }
 
-    /// Returns maximum number of TDI bits we can fit into a single DAP packet.
+    /// Returns maximum number of TDI bits that can fit into a single DAP packet.
     pub fn max_tdi_bits(&self) -> usize {
-        // Packet size minus two header bytes.
-        let bytes = self.jtag.dap.packet_size() - 2;
-        // As many 64-bit sequences as possible, 9 bytes each (1 byte header, 8 bytes data).
-        let full = bytes / 9;
-        // Mop up the rest, after another 1 byte header.
-        let remaining = bytes - (full * 9) - 1;
-        // Convert to bits.
-        let bits = (full * 64) + (remaining * 8);
-        log::trace!("Computed maximum TDI bits as {}", bits);
-        bits
+        self.jtag.max_tdi_bits()
     }
 
     /// Consume the JTAGTAP and return its JTAG and JTAGChain.
@@ -726,7 +743,7 @@ impl JTAGTAP {
     /// Move to Shift-DR and write `dr` to DR.
     /// Exits Shift-DR and enters Exit1-DR once complete.
     pub fn write_dr(&mut self, dr: &[bool]) -> Result<()> {
-        // Add dummy bits before and after our IR as required.
+        // Add dummy bits before and after our DR as required.
         let mut tdi = vec![true; self.dr_prefix];
         tdi.extend_from_slice(dr);
         tdi.extend_from_slice(&vec![true; self.dr_suffix]);
@@ -734,16 +751,19 @@ impl JTAGTAP {
         self.jtag.write_dr(&tdi)
     }
 
-    /// Move to Shift-DR if not already there and write `dr` directly,
-    /// without any prefix or suffix for our TAP position, and remain
-    /// in Shift-DR afterwards.
-    /// This method requires that only one TAP is present in the chain.
-    pub fn write_dr_raw(&mut self, dr: &[bool]) -> Result<()> {
-        if self.n_taps() == 1 {
-            self.jtag.write_dr_and_stay(&dr)
-        } else {
-            Err(Error::MultipleTAPs)
-        }
+    /// Move to Shift-DR and write `dr` to DR.
+    /// Exits Shift-DR and enters Exit1-Dr once complete.
+    ///
+    /// This method is similar to `write_dr`, but it additionally
+    /// calls the callback `cb` with the current number of bits
+    /// transferred at a regular interval.
+    pub fn write_dr_cb<F: Fn(usize)>(&mut self, dr: &[bool], cb: F) -> Result<()> {
+        // Add dummy bits before and after our DR as required.
+        let mut tdi = vec![true; self.dr_prefix];
+        tdi.extend_from_slice(dr);
+        tdi.extend_from_slice(&vec![true; self.dr_suffix]);
+
+        self.jtag.write_dr_cb(&dr, cb)
     }
 
     /// Move to Shift-DR, read `n` bits of DR while writing 0xFF.

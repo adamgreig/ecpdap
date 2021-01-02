@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 * Improve flash write performance by reducing JTAG state transitions.
+* Fix ECP5 programming in long scan chains.
 
 ## [v0.1.3] - 2021-01-02
 

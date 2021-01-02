@@ -289,14 +289,8 @@ impl ECP5 {
         let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
         let bits = bytes_to_bits(&data, data.len() * 8)?;
 
-        // Write in ten-packet chunks, to give the progress bar something to do.
-        let mut total_bytes = 0;
-        cb(total_bytes);
-        for chunk in bits.chunks(self.tap.max_tdi_bits() * 10) {
-            self.tap.write_dr_raw(&chunk)?;
-            total_bytes += chunk.len() / 8;
-            cb(total_bytes);
-        }
+        // Write bitstream, passing the callback through.
+        self.tap.write_dr_cb(&bits, |n| cb(n / 8))?;
 
         // Return to Run-Test/Idle to complete programming.
         self.tap.run_test_idle(1)?;
