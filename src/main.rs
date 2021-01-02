@@ -4,12 +4,12 @@ use std::time::{Instant, Duration};
 use clap::{Arg, App, AppSettings, SubCommand};
 use clap::{value_t, values_t, crate_description, crate_version};
 use anyhow::bail;
+use spi_flash::Flash;
 
 use ecpdap::probe::{Probe, ProbeInfo};
 use ecpdap::dap::DAP;
 use ecpdap::jtag::{JTAG, JTAGChain};
 use ecpdap::ecp5::ECP5;
-use ecpdap::flash::Flash;
 
 #[allow(clippy::cognitive_complexity)]
 fn main() -> anyhow::Result<()> {

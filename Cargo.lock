@@ -123,6 +123,7 @@ dependencies = [
  "num_enum",
  "pretty_env_logger",
  "rusb",
+ "spi-flash",
  "thiserror",
 ]
 
@@ -401,6 +402,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "spi-flash"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbbd4a1578d670c1e8c88d7409bd75b3b5d5311ad8802369effc329388e90ce3"
+dependencies = [
+ "anyhow",
+ "indicatif",
+ "jep106",
+ "log",
+ "num_enum",
+ "thiserror",
 ]
 
 [[package]]

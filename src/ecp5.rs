@@ -4,9 +4,9 @@ use std::convert::TryFrom;
 use std::fmt;
 use num_enum::{FromPrimitive, TryFromPrimitive};
 use indicatif::{ProgressBar, ProgressStyle};
+use spi_flash::FlashAccess;
 use crate::jtag::{IDCODE, JTAGTAP, Error as JTAGError};
 use crate::bitvec::{byte_to_bits, bytes_to_bits, bits_to_bytes, drain_u32, Error as BitvecError};
-use crate::flash::FlashAccess;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
