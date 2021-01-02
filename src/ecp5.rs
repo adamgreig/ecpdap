@@ -245,10 +245,37 @@ impl ECP5 {
         Ok(Status::new(status))
     }
 
-    /// Program the ECP5 configuration SRAM.
+    /// Program the ECP5 configuration SRAM with the bitstream in `data`.
     ///
     /// The ECP5 will be reset and start configuration after programming completion.
     pub fn program(&mut self, data: &[u8]) -> Result<()> {
+        self.program_cb(data, |_| {})
+    }
+
+    /// Program the ECP5 configuration SRAM with the bitstream in `data`.
+    ///
+    /// The ECP5 will be reset and start configuration after programming completion.
+    ///
+    /// A progress bar is drawn to the terminal during programming.
+    pub fn program_progress(&mut self, data: &[u8]) -> Result<()> {
+        let pb = ProgressBar::new(data.len() as u64).with_style(ProgressStyle::default_bar()
+            .template(" {msg} [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}; {eta})")
+            .progress_chars("=> "));
+        pb.set_message("Programming");
+        pb.set_position(0);
+
+        self.program_cb(data, |n| pb.set_position(n as u64))?;
+
+        pb.finish();
+        Ok(())
+    }
+
+    /// Program the ECP5 configuration SRAM with the bitstream in `data`.
+    ///
+    /// The ECP5 will be reset and start configuration after programming completion.
+    ///
+    /// The callback `cb` is called with the number of bytes programmed so far.
+    pub fn program_cb<F: Fn(usize)>(&mut self, data: &[u8], cb: F) -> Result<()> {
         // Enable configuration interface.
         self.command(Command::ISC_ENABLE)?;
         self.tap.run_test_idle(50)?;
@@ -257,21 +284,18 @@ impl ECP5 {
 
         self.command(Command::LSC_BITSTREAM_BURST)?;
 
-        // Create a progress bar for loading.
-        let pb = ProgressBar::new(data.len() as u64).with_style(ProgressStyle::default_bar()
-            .template(" {msg} [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}; {eta})")
-            .progress_chars("=> "));
-        pb.set_message("Programming");
-
         // Load in entire bitstream.
         // We have to bit-reverse each byte of bitstream for the ECP5.
         let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
         let bits = bytes_to_bits(&data, data.len() * 8)?;
 
         // Write in ten-packet chunks, to give the progress bar something to do.
+        let mut total_bytes = 0;
+        cb(total_bytes);
         for chunk in bits.chunks(self.tap.max_tdi_bits() * 10) {
             self.tap.write_dr_raw(&chunk)?;
-            pb.inc(chunk.len() as u64 / 8);
+            total_bytes += chunk.len() / 8;
+            cb(total_bytes);
         }
 
         // Return to Run-Test/Idle to complete programming.

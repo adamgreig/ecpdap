@@ -224,8 +224,11 @@ fn main() -> anyhow::Result<()> {
             let mut file = File::open(path)?;
             let mut data = Vec::new();
             file.read_to_end(&mut data)?;
-            ecp5.program(&data)?;
-            if !quiet { println!("Configuration programmed OK.") };
+            if quiet {
+                ecp5.program(&data)?;
+            } else {
+                ecp5.program_progress(&data)?;
+            }
         },
         Some("flash") => {
             let mut ecp5_flash = ecp5.into_flash()?;
