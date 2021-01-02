@@ -31,14 +31,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Handle to an open probe, either CMSIS-DAP v1 or v2.
 pub enum Probe {
     /// CMSIS-DAP v1 over HID.
-    V1(hidapi::HidDevice),
+    V1 {
+        device: hidapi::HidDevice,
+        report_size: usize,
+    },
 
     /// CMSIS-DAP v2 over WinUSB/Bulk.
     V2 {
         handle: rusb::DeviceHandle<rusb::Context>,
         out_ep: u8,
         in_ep: u8,
-        max_packet_size: u16,
+        max_packet_size: usize,
     },
 }
 
@@ -55,6 +58,25 @@ impl Probe {
             Err(Error::MultipleProbesFound)
         } else {
             probes[0].open()
+        }
+    }
+
+    /// Update the packet size.
+    ///
+    /// The maximum packet size is initially set when the probe is opened,
+    /// using the USB descriptor size for CMSIS-DAPv2 devices, but using a
+    /// default of 64 bytes for CMSIS-DAPv1 devices, as the HID report size
+    /// cannot be queried.
+    ///
+    /// Once the probe is opened, the maximum packet size can be requested
+    /// over CMSIS-DAP and then this method used to update it.
+    ///
+    /// This method only has an effect for CMSIS-DAPv1 devices, as v2 devices
+    /// should always have the correct packet size from the USB descriptor.
+    pub fn set_packet_size(&mut self, packet_size: usize) {
+        match self {
+            Probe::V1 { report_size, .. } => *report_size = packet_size,
+            _ => (),
         }
     }
 
@@ -100,7 +122,7 @@ impl Probe {
                         log::debug!("Successfully opened v2 probe: {:?}", device);
                         let out_ep = eps[0].address();
                         let in_ep = eps[1].address();
-                        let max_packet_size = eps[1].max_packet_size();
+                        let max_packet_size = eps[1].max_packet_size() as usize;
                         return Ok(Probe::V2 { handle, out_ep, in_ep, max_packet_size });
                     }
                     Err(_) => continue,
@@ -121,7 +143,9 @@ impl Probe {
             Ok(device) => match device.get_product_string() {
                 Ok(Some(s)) if s.contains("CMSIS-DAP") => {
                     log::debug!("Successfully opened v1 probe: {:?}", info);
-                    Ok(Probe::V1(device))
+                    // Start with a default of 64 byte packet size, which is
+                    // the most common report size for CMSIS-DAPv1 HID devices.
+                    Ok(Probe::V1 { device, report_size: 64 })
                 },
                 _ => Err(Error::NotFound),
             },
@@ -134,9 +158,9 @@ impl Probe {
         log::trace!("Draining pending data from probe");
         let mut buf = vec![0u8; 1024];
         match self {
-            Self::V1(device) => {
+            Self::V1 { device, report_size } => {
                 loop {
-                    match device.read_timeout(&mut buf[..], 1) {
+                    match device.read_timeout(&mut buf[..*report_size], 1) {
                         Ok(n) if n > 0 => continue,
                         Ok(_) => break,
                         Err(e) => return Err(e)?,
@@ -160,15 +184,15 @@ impl Probe {
 
     /// Read up to one CMSIS-DAP packet from the probe, waiting up to 100ms.
     pub fn read(&self) -> Result<Vec<u8>> {
-        // Read up to 64 bytes for HID devices, or the maximum packet size for v2 devices.
+        // Read up to the maximum packet size. For HID devices, we'll always read a full
+        // report which is exactly this size.
         let bufsize = match self {
-            Self::V1(_) => 64,
-            Self::V2 { max_packet_size, .. } =>
-                *max_packet_size as usize,
+            Self::V1 { report_size, .. } => *report_size,
+            Self::V2 { max_packet_size, .. } => *max_packet_size,
         };
         let mut buf = vec![0u8; bufsize];
         let n = match self {
-            Self::V1(device) => device.read_timeout(&mut buf[..], 100)?,
+            Self::V1 { device, .. } => device.read_timeout(&mut buf[..], 100)?,
             Self::V2 { handle, in_ep, .. } => {
                 let timeout = Duration::from_millis(100);
                 handle.read_bulk(*in_ep, &mut buf[..], timeout)?
@@ -183,12 +207,11 @@ impl Probe {
     pub fn write(&self, buf: &[u8]) -> Result<usize> {
         log::trace!("TX: {:02X?}", buf);
         match self {
-            Self::V1(device) => {
+            Self::V1 { device, report_size, .. } => {
                 let mut buf = buf.to_vec();
-                // Extend buffer to 64 bytes for HID access, which requires
-                // exactly report-sized packets.  We can't in general find
-                // out what the report size is, but 64 is very common.
-                buf.resize(64, 0);
+                // Extend buffer to report size for HID access, which requires
+                // exactly report-sized packets.
+                buf.resize(*report_size, 0);
                 // Insert HID report ID at start.
                 buf.insert(0, 0);
                 Ok(device.write(&buf[..])?)

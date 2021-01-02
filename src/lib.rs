@@ -1,6 +1,9 @@
+// Copyright 2020, 2021 Adam Greig
+// Licensed under the Apache-2.0 and MIT licenses.
+
 //! ecpdap
-//! Copyright 2020 Adam Greig
-//! Licensed under the Apache-2.0 and MIT licenses.
+//!
+//! ECP5 FPGA and SPI flash programming utility using CMSIS-DAP probes.
 
 #[macro_use]
 pub mod bitvec;

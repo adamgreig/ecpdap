@@ -36,15 +36,23 @@ pub struct DAP {
 
 impl DAP {
     pub fn new(probe: Probe) -> Result<DAP> {
+        // Drain any pending data in the probe's USB buffer, to
+        // prevent our first reads being corrupted by unexpected
+        // data.
         probe.drain()?;
 
         let mut dap = DAP { probe, packet_size: 0 };
+
+        // Query the packet size over CMSIS-DAP, then use it
+        // to update the underlying probe packet size for
+        // CMSIS-DAPv1 devices.
+        dap.packet_size = dap.get_packet_size()?;
+        dap.probe.set_packet_size(dap.packet_size);
 
         if !dap.has_jtag()? {
             return Err(Error::NoJTAG);
         }
 
-        dap.packet_size = dap.get_packet_size()?;
         dap.connect()?;
         dap.set_led(true)?;
 
