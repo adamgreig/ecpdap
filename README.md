@@ -1,5 +1,9 @@
 # ECPDAP
 
+[![crates.io](https://img.shields.io/crates/v/ecpdap.svg)](https://crates.io/crates/ecpdap)
+[![docs.rs](https://docs.rs/ecpdap/badge.svg)](https://docs.rs/ecpdap)
+![CI](https://github.com/adamgreig/ecpdap/workflows/CI/badge.svg)
+
 ECPDAP allows you to program ECP5 FPGAs and attached SPI flash using CMSIS-DAP
 probes in JTAG mode.
 
@@ -54,3 +58,13 @@ Run `ecpdap help` for detailed usage. Commonly used commands:
 * `ecpdap flash id`
 * `ecpdap flash scan`
 * `ecpdap flash write bitstream.bit`
+
+## Licence
+
+ecpdap is licensed under either of
+
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  http://www.apache.org/licenses/LICENSE-2.0)
+* MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
