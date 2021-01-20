@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+* Detect HID-only probes that are not found by libusb.
+* Update spi-flash dependency to fix errors when using some flash ICs.
+
 ## [v0.1.4] - 2021-01-02
 
 * Improve flash write performance by reducing JTAG state transitions.

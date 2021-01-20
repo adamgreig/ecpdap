@@ -6,7 +6,7 @@
 use std::time::Duration;
 use thiserror::Error;
 use rusb::{Device, Context, UsbContext};
-use hidapi::HidApi;
+use hidapi::{HidApi, DeviceInfo};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -239,12 +239,34 @@ pub struct ProbeInfo {
 
 impl ProbeInfo {
     /// Find all connected CMSIS-DAP probes.
+    ///
+    /// Builds a list using rusb first, and then adds on any probes found using HID which
+    /// are not already present in the list.
     pub fn list() -> Vec<Self> {
         log::trace!("Searching for CMSIS-DAP probes");
-        match Context::new().and_then(|ctx| ctx.devices()) {
+
+        let mut probes = match Context::new().and_then(|ctx| ctx.devices()) {
             Ok(devices) => devices.iter().filter_map(|d| Self::from_device(&d)).collect(),
             Err(_) => vec![],
+        };
+
+        log::trace!("Found {} devices using rusb, searching HID", probes.len());
+
+        if let Ok(api) = HidApi::new() {
+            for device in api.device_list() {
+                if let Some(info) = Self::from_hid(&device) {
+                    if !probes.iter().any(|p| info.matches(p)) {
+                        log::trace!("Adding new HID-only probe {}", info);
+                        probes.push(info)
+                    } else {
+                        log::trace!("Ignoring duplicate {}", info);
+                    }
+                }
+            }
         }
+
+        log::trace!("Found {} probes in total", probes.len());
+        probes
     }
 
     /// Create a ProbeInfo from a specifier string.
@@ -305,6 +327,24 @@ impl ProbeInfo {
                 pid: desc.product_id(),
                 sn: sn_str,
                 v1_only: false,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Create a ProbeInfo from a hidapi DeviceInfo if it is a CMSIS-DAP probe.
+    ///
+    /// Returns None if the device could not be read or was not a CMSIS-DAP device.
+    fn from_hid(device: &DeviceInfo) -> Option<ProbeInfo> {
+        let prod_str = device.product_string()?;
+        if prod_str.contains("CMSIS-DAP") {
+            Some(Self {
+                name: Some(prod_str.to_owned()),
+                vid: device.vendor_id(),
+                pid: device.product_id(),
+                sn: device.serial_number().map(|s| s.to_owned()),
+                v1_only: true,
             })
         } else {
             None
