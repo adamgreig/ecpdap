@@ -411,9 +411,9 @@ dependencies = [
 
 [[package]]
 name = "spi-flash"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84e55a31ef9f25f3a316d9f13275fe902bbb274ac32f581c13037a9c6825db3e"
+checksum = "b051bde9f590273086e4b3bdbb934d508560fa3052d8c018a7fa2e1d43308f86"
 dependencies = [
  "anyhow",
  "indicatif",
