@@ -64,11 +64,14 @@ jobs:
           draft: true
           prerelease: false
           body: |
-            The following pre-built files are available:
-              * `ecpdap_linux_x86_64`: ecpdap control software for Linux (64-bit)
-              * `ecpdap_windows_x86_64.exe`: ecpdap control software for Windows (64-bit)
+            In this release:
 
-            ecpdap requires libusb be installed; on Linux it should suffice to install libusb-1.0, on Windows download the pre-built DLLs from [libusb.info](https://libusb.info/) and either install them system-wide or put them in the same directory as your executable.
+
+            The following pre-built files are available:
+              * `ecpdap_linux_x86_64`: ecpdap software for Linux (64-bit)
+              * `ecpdap_windows_x86_64.exe`: ecpdap software for Windows (64-bit)
+
+            ecpdap recommends libusb be installed; on Linux it should suffice to install libusb-1.0, on Windows download the pre-built DLLs from [libusb.info](https://libusb.info/) and either install them system-wide or put them in the same directory as your executable. Without libusb, only the slower HID-based CMSIS-DAPv1 protocol is available.
 
       - name: Upload ecpdap for Linux x86_64
         uses: actions/upload-release-asset@v1

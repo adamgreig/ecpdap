@@ -9,13 +9,13 @@ probes in JTAG mode.
 
 ## JTAG Scan Chains
 
-ECP5 FPGAs can be programmed on arbitrary JTAG scan chains; you may need to
-specify `--ir-lengths` and possibly specify a higher `--scan-chain-length`
+ECP5 FPGAs can be programmed on arbitrary length JTAG scan chains; you may need
+to specify `--ir-lengths` and possibly specify a higher `--scan-chain-length`
 depending on the other devices on your scan chain.
 
-However, the attached SPI flashes require that the ECP5 is the only device
-on the scan chain (in other words, the probe TDI and TDO connect directly
-to the ECP5 pins).
+However, accessing the attached SPI flashes require that the ECP5 is the only
+device on the scan chain (in other words, the probe TDI and TDO connect
+directly to the ECP5 pins).
 
 ## Pre-built Binaries
 
@@ -30,16 +30,17 @@ have permissions or drivers set up to access your CMSIS-DAP probe.
 
 * You must have a working Rust compiler installed.
   Visit [rustup.rs](https://rustup.rs) to install Rust.
-* You must have [libusb] installed.
-* You'll need to set up drivers or permissions to access the USB device.
+* [libusb] is recommended to use the higher-speed CMSIS-DAPv2 protocol, where
+  supported by your probe.
+* You may need to set up drivers or permissions to access the USB device.
 
-Build and install for your user, without checking out the repository:
+To build and install for your user, without checking out the repository:
 
 ```
 cargo install ecpdap
 ```
 
-Building locally after checking out this repository:
+Or, building locally after checking out this repository:
 
 ```
 cargo build --release
@@ -52,12 +53,12 @@ or you can install it for your user using `cargo install --path .`.
 
 Run `ecpdap help` for detailed usage. Commonly used commands:
 
-* `ecpdap probes`
-* `ecpdap scan`
-* `ecpdap program bitstream.bit`
-* `ecpdap flash id`
-* `ecpdap flash scan`
-* `ecpdap flash write bitstream.bit`
+* `ecpdap probes`: List all detected CMSIS-DAP probes
+* `ecpdap scan`: Scan the JTAG chain to detect ECP5 devices
+* `ecpdap program bitstream.bit`: Program `bitstream.bit` to the ECP5
+* `ecpdap flash id`: Read the flash manufacturer and product IDs
+* `ecpdap flash scan`: Read the flash SFDP metadata and status registers
+* `ecpdap flash write bitstream.bit`: Write `bitstream.bit` to flash memory.
 
 ## Licence
 
