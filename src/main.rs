@@ -6,10 +6,10 @@ use clap::{value_t, values_t, crate_description, crate_version};
 use anyhow::bail;
 use spi_flash::Flash;
 
-use ecpdap::probe::{Probe, ProbeInfo};
-use ecpdap::dap::DAP;
-use ecpdap::jtag::{JTAG, JTAGChain};
-use ecpdap::ecp5::ECP5;
+use jtagdap::probe::{Probe, ProbeInfo};
+use jtagdap::dap::DAP;
+use jtagdap::jtag::{JTAG, JTAGChain};
+use ecpdap::{ECP5, check_tap_idx, auto_tap_idx};
 
 #[allow(clippy::cognitive_complexity)]
 fn main() -> anyhow::Result<()> {
@@ -193,7 +193,7 @@ fn main() -> anyhow::Result<()> {
     // attempt to find a single ECP5 in the scan chain.
     let tap_idx = if matches.is_present("tap") {
         match value_t!(matches, "tap", usize) {
-            Ok(tap) => if chain.check_idx(tap) {
+            Ok(tap) => if check_tap_idx(&chain, tap) {
                 log::debug!("Provided tap index is an ECP5");
                 tap
             } else {
@@ -206,7 +206,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
     } else {
-        match chain.auto_idx() {
+        match auto_tap_idx(&chain) {
             Some(index) => index,
             None => {
                 print_jtag_chain(&chain);

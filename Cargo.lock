@@ -121,13 +121,11 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
- "hidapi",
  "indicatif",
- "jep106",
+ "jtagdap",
  "log",
  "num_enum",
  "pretty_env_logger",
- "rusb",
  "spi-flash",
  "thiserror",
 ]
@@ -211,6 +209,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f57cd08ee4fbc8043949150a59e34ea5f2afeb172f875db9607689e48600c653"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "jtagdap"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4ec46948aa04628d0df96420a2878da43ce8a67bc8fc00d9c491bee7bb5efac"
+dependencies = [
+ "hidapi",
+ "jep106",
+ "log",
+ "num_enum",
+ "rusb",
+ "thiserror",
 ]
 
 [[package]]
