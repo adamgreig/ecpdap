@@ -7,6 +7,14 @@
 ECPDAP allows you to program ECP5 FPGAs and attached SPI flash using CMSIS-DAP
 probes in JTAG mode.
 
+This crate uses [jtagdap] to handle CMSIS-DAP and JTAG, and [spi-flash-rs] to
+handle the SPI flash itself. For programming SPI flashes directly, for example
+when using iCE40 FPGAs, check out [spidap], which uses the same libraries.
+
+[jtagdap]: https://github.com/adamgreig/jtagdap
+[spi-flash-rs]: https://github.com/adamgreig/spi-flash-rs
+[spidap]: https://github.com/adamgreig/spidap
+
 ## JTAG Scan Chains
 
 ECP5 FPGAs can be programmed on arbitrary length JTAG scan chains; you may need
