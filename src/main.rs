@@ -242,6 +242,8 @@ fn main() -> anyhow::Result<()> {
         Some("flash") => {
             let mut ecp5_flash = ecp5.into_flash()?;
             let mut flash = Flash::new(&mut ecp5_flash);
+            // Always bring flash out of power-down before trying to access.
+            flash.release_power_down()?;
             // Always read parameter table if available, to load
             // settings for address bytes, capacity, opcodes, etc.
             flash.read_params()?;
@@ -316,7 +318,6 @@ fn main() -> anyhow::Result<()> {
                         }
                     };
                     let mut file = File::create(path)?;
-                    flash.read_params()?;
                     let data = if quiet {
                         flash.read(offset, length)?
                     } else {
@@ -326,17 +327,11 @@ fn main() -> anyhow::Result<()> {
                 },
                 Some("protect") => {
                     if !quiet { println!("Setting block protection bits...") };
-                    // Read SFDP parameters in case they have instructions for
-                    // the non-volatile status register write.
-                    flash.read_params()?;
                     flash.protect(true, true, true)?;
                     if !quiet { println!("All block protection bits set.") };
                 },
                 Some("unprotect") => {
                     if !quiet { println!("Disabling flash write protection...") };
-                    // Read SFDP parameters in case they have instructions for
-                    // the non-volatile status register write.
-                    flash.read_params()?;
                     flash.unprotect()?;
                     if !quiet { println!("Flash protected disabled.") };
                 },
