@@ -29,10 +29,12 @@ directly to the ECP5 pins).
 
 Pre-built binaries are available for Windows and Linux on the [Releases] page.
 You must have [libusb] installed or available on your system, and you must
-have permissions or drivers set up to access your CMSIS-DAP probe.
+have permissions or drivers set up to access your CMSIS-DAP probe. See the
+[drivers] page for information on setup.
 
 [Releases]: https://github.com/adamgreig/ecpdap/releases
 [libusb]: https://libusb.info
+[drivers]: https://github.com/adamgreig/ecpdap/tree/master/drivers
 
 ## Building
 
