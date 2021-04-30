@@ -32,6 +32,8 @@ You must have [libusb] installed or available on your system, and you must
 have permissions or drivers set up to access your CMSIS-DAP probe. See the
 [drivers] page for information on setup.
 
+ECPDAP is also packaged for NixOS under the `ecpdap` attribute.
+
 [Releases]: https://github.com/adamgreig/ecpdap/releases
 [libusb]: https://libusb.info
 [drivers]: https://github.com/adamgreig/ecpdap/tree/master/drivers
