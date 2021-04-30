@@ -1,0 +1,2 @@
+# Allow access to all CMSIS-DAP compatible adapters
+ATTRS{product}=="*CMSIS-DAP*", MODE="660", GROUP="plugdev", TAG+="uaccess"
