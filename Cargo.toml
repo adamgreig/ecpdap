@@ -1,6 +1,6 @@
 [package]
 name = "ecpdap"
-version = "0.1.5"
+version = "0.1.6"
 authors = ["Adam Greig <adam@adamgreig.com>"]
 edition = "2018"
 repository = "https://github.com/adamgreig/ecpdap"

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [v0.1.6] - 2021-04-30
+
+* No functional changes.
+* Updated to include new `Cargo.lock` and udev rules file as part of a tagged
+  release.
+
 ## [v0.1.5] - 2021-01-20
 
 * Detect HID-only probes that are not found by libusb.
@@ -31,7 +37,8 @@
 
 * Initial release.
 
-[Unreleased]: https://github.com/adamgreig/ecpdap/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/adamgreig/ecpdap/compare/v0.1.6...HEAD
+[v0.1.6]: https://github.com/adamgreig/ecpdap/compare/v0.1.5...v0.1.6
 [v0.1.5]: https://github.com/adamgreig/ecpdap/compare/v0.1.4...v0.1.5
 [v0.1.4]: https://github.com/adamgreig/ecpdap/compare/v0.1.3...v0.1.4
 [v0.1.3]: https://github.com/adamgreig/ecpdap/compare/v0.1.2...v0.1.3
