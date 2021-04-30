@@ -28,9 +28,10 @@ directly to the ECP5 pins).
 ## Pre-built Binaries
 
 Pre-built binaries are available for Windows and Linux on the [Releases] page.
-ECPDAP is also packaged for NixOS under the `ecpdap` attribute. You must have 
-[libusb] installed or available on your system, and you must have permissions 
-or drivers set up to access your CMSIS-DAP probe.
+You must have [libusb] installed or available on your system, and you must
+have permissions or drivers set up to access your CMSIS-DAP probe.
+
+ECPDAP is also packaged for NixOS under the `ecpdap` attribute.
 
 [Releases]: https://github.com/adamgreig/ecpdap/releases
 [libusb]: https://libusb.info
