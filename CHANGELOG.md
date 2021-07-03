@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v0.1.7] - 2021-07-03
+
 * Print names of detected ECP5 parts when scanning the JTAG chain.
 
 ## [v0.1.6] - 2021-04-30
@@ -39,7 +41,8 @@
 
 * Initial release.
 
-[Unreleased]: https://github.com/adamgreig/ecpdap/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/adamgreig/ecpdap/compare/v0.1.7...HEAD
+[v0.1.7]: https://github.com/adamgreig/ecpdap/compare/v0.1.6...v0.1.7
 [v0.1.6]: https://github.com/adamgreig/ecpdap/compare/v0.1.5...v0.1.6
 [v0.1.5]: https://github.com/adamgreig/ecpdap/compare/v0.1.4...v0.1.5
 [v0.1.4]: https://github.com/adamgreig/ecpdap/compare/v0.1.3...v0.1.4
