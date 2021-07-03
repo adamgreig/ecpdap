@@ -9,7 +9,7 @@ use spi_flash::Flash;
 use jtagdap::probe::{Probe, ProbeInfo};
 use jtagdap::dap::DAP;
 use jtagdap::jtag::{JTAG, JTAGChain};
-use ecpdap::{ECP5, check_tap_idx, auto_tap_idx};
+use ecpdap::{ECP5, ECP5IDCODE, check_tap_idx, auto_tap_idx};
 
 #[allow(clippy::cognitive_complexity)]
 fn main() -> anyhow::Result<()> {
@@ -364,7 +364,13 @@ fn print_probe_list() {
 
 fn print_jtag_chain(chain: &JTAGChain) {
     println!("Detected JTAG chain, closest to TDO first:");
-    for line in chain.to_lines() {
-        println!(" - {}", line);
+    let idcodes = chain.idcodes();
+    let lines = chain.to_lines();
+    for (idcode, line) in idcodes.iter().zip(lines.iter()) {
+        if let Some(Some(ecp5)) = idcode.map(|id| ECP5IDCODE::try_from_idcode(&id)) {
+            println!(" - {} [{}]", line, ecp5.name());
+        } else {
+            println!(" - {}", line);
+        }
     }
 }

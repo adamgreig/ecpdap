@@ -70,11 +70,8 @@ impl ECP5IDCODE {
 /// Check whether the provided TAP index in a JTAGChain is an ECP5.
 pub fn check_tap_idx(chain: &JTAGChain, index: usize) -> bool {
     match chain.idcodes().iter().nth(index) {
-        Some(tap) => match tap {
-            Some(idcode) => ECP5IDCODE::try_from_idcode(idcode).is_some(),
-            None => false,
-        },
-        None => false,
+        Some(Some(idcode)) => ECP5IDCODE::try_from_idcode(idcode).is_some(),
+        _ => false,
     }
 }
 
@@ -103,7 +100,7 @@ pub fn auto_tap_idx(chain: &JTAGChain) -> Option<usize> {
 
 /// All known ECP5 JTAG instructions.
 #[derive(Copy, Clone, Debug)]
-#[allow(unused, non_camel_case_types)]
+#[allow(unused, non_camel_case_types, clippy::upper_case_acronyms)]
 #[repr(u8)]
 enum Command {
     ISC_NOOP = 0xFF,

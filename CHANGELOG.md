@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+* Print names of detected ECP5 parts when scanning the JTAG chain.
+
 ## [v0.1.6] - 2021-04-30
 
 * No functional changes.
