@@ -31,5 +31,8 @@ allowing ECPDAP to use the device.
 
 ## MacOS
 
-No information for MacOS is known at present. If you are using MacOS, please
-consider updating this file.
+Install libusb-compat via Homebrew:
+```
+brew install libusb-compat 
+```
+Confirmed working under MacOS 11.4 Big Sur
