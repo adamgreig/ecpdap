@@ -19,6 +19,8 @@ pub enum Error {
     BadStatus,
     #[error("Cannot access flash memory unless the ECP5 is the only TAP in the JTAG chain.")]
     NotOnlyTAP,
+    #[error("SPI Flash error")]
+    SPIFlash(#[from] spi_flash::Error),
     #[error("JTAG error")]
     JTAG(#[from] JTAGError),
     #[error("Bitvec error")]
@@ -294,13 +296,24 @@ impl ECP5 {
     ///
     /// A progress bar is drawn to the terminal during programming.
     pub fn program_progress(&mut self, data: &[u8]) -> Result<()> {
-        let pb = ProgressBar::new(data.len() as u64).with_style(ProgressStyle::default_bar()
-            .template(" {msg} [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}; {eta})")
-            .progress_chars("=> "));
+        const DATA_PROGRESS_TPL: &'static str =
+            " {msg} [{bar:40.cyan/black}] {bytes}/{total_bytes} ({bytes_per_sec}; {eta_precise})";
+        const DATA_FINISHED_TPL: &'static str =
+            " {msg} [{bar:40.green/black}] {bytes}/{total_bytes} ({bytes_per_sec}; {eta_precise})";
+        const DATA_PROGRESS_CHARS: &'static str = "━╸━";
+        let pb = ProgressBar::new(data.len() as u64).with_style(
+            ProgressStyle::with_template(DATA_PROGRESS_TPL)
+                .unwrap()
+                .progress_chars(DATA_PROGRESS_CHARS));
         pb.set_message("Programming");
         pb.set_position(0);
 
         self.program_cb(data, |n| pb.set_position(n as u64))?;
+
+        pb.set_style(ProgressStyle::with_template(DATA_FINISHED_TPL)
+            .unwrap()
+            .progress_chars(DATA_PROGRESS_CHARS)
+        );
 
         pb.finish();
         Ok(())
@@ -443,6 +456,12 @@ impl ECP5 {
     }
 }
 
+impl std::convert::From<Error> for spi_flash::Error {
+    fn from(err: Error) -> spi_flash::Error {
+        spi_flash::Error::Access(err.into())
+    }
+}
+
 /// Access to attached SPI flash on an ECP5.
 pub struct ECP5Flash {
     ecp5: ECP5,
@@ -459,14 +478,16 @@ impl ECP5Flash {
 }
 
 impl FlashAccess for ECP5Flash {
-    fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
+    type Error = Error;
+
+    fn write(&mut self, data: &[u8]) -> Result<()> {
         let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
         let bits = bytes_to_bits(&data, data.len() * 8)?;
         self.ecp5.tap.write_dr(&bits)?;
         Ok(())
     }
 
-    fn exchange(&mut self, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    fn exchange(&mut self, data: &[u8]) -> Result<Vec<u8>> {
         let data: Vec<u8> = data.iter().map(|x| x.reverse_bits()).collect();
         let bits = bytes_to_bits(&data, data.len() * 8)?;
         let result = self.ecp5.tap.exchange_dr(&bits)?;
