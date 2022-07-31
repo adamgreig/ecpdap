@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [v0.1.8] - 2022-07-31
+
+* Update to latest jtagdap 0.1.1, improving CMSIS-DAP detection
+* Update to latest spi-flash 0.3.0, no functional changes
+* Improve progress bars
+
 ## [v0.1.7] - 2021-07-03
 
 * Print names of detected ECP5 parts when scanning the JTAG chain.
