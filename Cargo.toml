@@ -17,3 +17,4 @@ clap = { version = "4.0.7", features = ["cargo", "unicode"] }
 indicatif = "0.17.0"
 spi-flash = "0.3.0"
 jtagdap = "0.1.1"
+nom = "7.1"

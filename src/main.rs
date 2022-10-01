@@ -1,3 +1,6 @@
+// Copyright 2019-2022 Adam Greig
+// Licensed under the Apache-2.0 and MIT licenses.
+
 use std::{io::{Read, Write}, fs::File, time::{Instant, Duration}};
 use clap::{Command, Arg, ArgAction, crate_description, crate_version, value_parser};
 use anyhow::bail;

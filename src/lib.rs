@@ -1,17 +1,19 @@
-// Copyright 2020, 2021 Adam Greig
+// Copyright 2020-2022 Adam Greig
 // Licensed under the Apache-2.0 and MIT licenses.
 
 //! ecpdap
 //!
 //! ECP5 FPGA and SPI flash programming utility using CMSIS-DAP probes.
 
-use std::convert::TryFrom;
+use std::convert::{From, TryFrom};
 use std::fmt;
 use num_enum::{FromPrimitive, TryFromPrimitive};
 use indicatif::{ProgressBar, ProgressStyle};
 use spi_flash::FlashAccess;
 use jtagdap::jtag::{IDCODE, JTAGTAP, JTAGChain, Error as JTAGError};
 use jtagdap::bitvec::{byte_to_bits, bytes_to_bits, bits_to_bytes, drain_u32, Error as BitvecError};
+
+mod bitstream;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -25,6 +27,8 @@ pub enum Error {
     JTAG(#[from] JTAGError),
     #[error("Bitvec error")]
     Bitvec(#[from] BitvecError),
+    #[error("I/O error")]
+    IO(#[from] std::io::Error),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -48,6 +52,18 @@ pub enum ECP5IDCODE {
     LFE5UM5G_85 = 0x81113043,
 }
 
+impl From<ECP5IDCODE> for IDCODE {
+    fn from(id: ECP5IDCODE) -> IDCODE {
+        IDCODE(id as u32)
+    }
+}
+
+impl From<&ECP5IDCODE> for IDCODE {
+    fn from(id: &ECP5IDCODE) -> IDCODE {
+        IDCODE(*id as u32)
+    }
+}
+
 impl ECP5IDCODE {
     pub fn try_from_idcode(idcode: &IDCODE) -> Option<Self> {
         Self::try_from(idcode.0).ok()
@@ -65,6 +81,34 @@ impl ECP5IDCODE {
             ECP5IDCODE::LFE5UM5G_25 => "LFE5UM5G-25",
             ECP5IDCODE::LFE5UM5G_45 => "LFE5UM5G-45",
             ECP5IDCODE::LFE5UM5G_85 => "LFE5UM5G-85",
+        }
+    }
+
+    /// Returns whether the provided IDCODE is considered compatible with
+    /// this IDCODE.
+    ///
+    /// IDCODEs considered compatible:
+    ///
+    /// * LFE5U_12, LFE5U_25, LFE5UM_25, LFE5UM5G_25
+    /// * LFE5U_45, LFE5UM_45, LFE5UM5G_45
+    /// * LFE5U_85, LFE5UM_85, LFE5UM5G_85
+    ///
+    pub fn compatible(&self, other: &ECP5IDCODE) -> bool {
+        use ECP5IDCODE::*;
+        let lfe5u_25 = &[LFE5U_12, LFE5U_25, LFE5UM_25, LFE5UM5G_25];
+        let lfe5u_45 = &[LFE5U_45, LFE5UM_45, LFE5UM5G_45];
+        let lfe5u_85 = &[LFE5U_85, LFE5UM_85, LFE5UM5G_85];
+        match self {
+            ECP5IDCODE::LFE5U_12 => lfe5u_25.contains(other),
+            ECP5IDCODE::LFE5U_25 => lfe5u_25.contains(other),
+            ECP5IDCODE::LFE5U_45 => lfe5u_45.contains(other),
+            ECP5IDCODE::LFE5U_85 => lfe5u_85.contains(other),
+            ECP5IDCODE::LFE5UM_25 => lfe5u_25.contains(other),
+            ECP5IDCODE::LFE5UM_45 => lfe5u_45.contains(other),
+            ECP5IDCODE::LFE5UM_85 => lfe5u_85.contains(other),
+            ECP5IDCODE::LFE5UM5G_25 => lfe5u_25.contains(other),
+            ECP5IDCODE::LFE5UM5G_45 => lfe5u_45.contains(other),
+            ECP5IDCODE::LFE5UM5G_85 => lfe5u_85.contains(other),
         }
     }
 }
