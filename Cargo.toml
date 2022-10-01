@@ -9,11 +9,11 @@ description = "Program ECP5 FPGAs using CMSIS-DAP probes"
 
 [dependencies]
 log = "0.4.17"
-anyhow = "1.0.58"
-thiserror = "1.0.31"
+anyhow = "1.0.65"
+thiserror = "1.0.37"
 pretty_env_logger = "0.4.0"
 num_enum = "0.5.7"
-clap = { version = "3.2.16", features = ["cargo", "unicode"] }
+clap = { version = "4.0.7", features = ["cargo", "unicode"] }
 indicatif = "0.17.0"
 spi-flash = "0.3.0"
 jtagdap = "0.1.1"

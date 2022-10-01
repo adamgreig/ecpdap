@@ -296,11 +296,11 @@ impl ECP5 {
     ///
     /// A progress bar is drawn to the terminal during programming.
     pub fn program_progress(&mut self, data: &[u8]) -> Result<()> {
-        const DATA_PROGRESS_TPL: &'static str =
+        const DATA_PROGRESS_TPL: &str =
             " {msg} [{bar:40.cyan/black}] {bytes}/{total_bytes} ({bytes_per_sec}; {eta_precise})";
-        const DATA_FINISHED_TPL: &'static str =
+        const DATA_FINISHED_TPL: &str =
             " {msg} [{bar:40.green/black}] {bytes}/{total_bytes} ({bytes_per_sec}; {eta_precise})";
-        const DATA_PROGRESS_CHARS: &'static str = "━╸━";
+        const DATA_PROGRESS_CHARS: &str = "━╸━";
         let pb = ProgressBar::new(data.len() as u64).with_style(
             ProgressStyle::with_template(DATA_PROGRESS_TPL)
                 .unwrap()

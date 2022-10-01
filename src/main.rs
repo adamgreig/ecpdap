@@ -1,8 +1,5 @@
-use std::fs::File;
-use std::io::prelude::*;
-use std::time::{Instant, Duration};
-use clap::{Arg, App, AppSettings, SubCommand};
-use clap::{value_t, values_t, crate_description, crate_version};
+use std::{io::{Read, Write}, fs::File, time::{Instant, Duration}};
+use clap::{Command, Arg, ArgAction, crate_description, crate_version, value_parser};
 use anyhow::bail;
 use spi_flash::Flash;
 
@@ -13,116 +10,124 @@ use ecpdap::{ECP5, ECP5IDCODE, check_tap_idx, auto_tap_idx};
 
 #[allow(clippy::cognitive_complexity)]
 fn main() -> anyhow::Result<()> {
-    let matches = App::new("ecpdap")
+    let matches = Command::new("ecpdap")
         .version(crate_version!())
         .about(crate_description!())
-        .setting(AppSettings::SubcommandRequiredElseHelp)
-        .global_setting(AppSettings::ColoredHelp)
-        .global_setting(AppSettings::DeriveDisplayOrder)
-        .global_setting(AppSettings::GlobalVersion)
-        .global_setting(AppSettings::InferSubcommands)
-        .arg(Arg::with_name("quiet")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .propagate_version(true)
+        .infer_subcommands(true)
+        .arg(Arg::new("quiet")
              .help("Suppress informative output")
              .long("quiet")
              .short('q')
+             .action(ArgAction::SetTrue)
              .global(true))
-        .arg(Arg::with_name("probe")
+        .arg(Arg::new("probe")
              .help("VID:PID[:SN] of CMSIS-DAP device to use")
              .long("probe")
              .short('p')
-             .takes_value(true)
+             .action(ArgAction::Set)
              .global(true))
-        .arg(Arg::with_name("freq")
+        .arg(Arg::new("freq")
              .help("JTAG clock frequency to use, in kHz")
              .long("freq")
              .short('f')
-             .takes_value(true)
+             .action(ArgAction::Set)
              .default_value("1000")
+             .value_parser(value_parser!(u32))
              .global(true))
-        .arg(Arg::with_name("tap")
+        .arg(Arg::new("tap")
              .help("ECP5's TAP position in scan chain (0-indexed, see `scan` output)")
              .long("tap")
              .short('t')
-             .takes_value(true)
+             .action(ArgAction::Set)
+             .value_parser(value_parser!(usize))
              .global(true))
-        .arg(Arg::with_name("ir-lengths")
+        .arg(Arg::new("ir-lengths")
              .help("Lengths of each IR, starting from TAP 0, comma-separated")
              .long("ir-lengths")
              .short('i')
-             .multiple(true)
-             .require_value_delimiter(true)
-             .use_value_delimiter(true)
-             .takes_value(true)
+             .action(ArgAction::Set)
+             .value_delimiter(',')
+             .value_parser(value_parser!(usize))
              .global(true))
-        .arg(Arg::with_name("scan-chain-length")
+        .arg(Arg::new("scan-chain-length")
              .help("Maximum JTAG scan chain length to check")
              .long("scan-chain-length")
              .short('l')
-             .takes_value(true)
+             .action(ArgAction::Set)
              .default_value("192")
+             .value_parser(value_parser!(usize))
              .global(true))
-        .subcommand(SubCommand::with_name("probes")
+        .subcommand(Command::new("probes")
             .about("List available CMSIS-DAP probes"))
-        .subcommand(SubCommand::with_name("scan")
+        .subcommand(Command::new("scan")
             .about("Scan JTAG chain and detect ECP5 IDCODEs"))
-        .subcommand(SubCommand::with_name("reset")
+        .subcommand(Command::new("reset")
             .about("Pulse the JTAG nRST line for 100ms"))
-        .subcommand(SubCommand::with_name("reload")
+        .subcommand(Command::new("reload")
             .about("Request the ECP5 reload its configuration"))
-        .subcommand(SubCommand::with_name("program")
+        .subcommand(Command::new("program")
             .about("Program ECP5 SRAM with bitstream")
-            .arg(Arg::with_name("file")
+            .arg(Arg::new("file")
                  .help("File to program to ECP5")
                  .required(true)))
-        .subcommand(SubCommand::with_name("flash")
+        .subcommand(Command::new("flash")
             .about("Access SPI flash attached to ECP5 when no other devices on JTAG chain")
-            .setting(AppSettings::SubcommandRequiredElseHelp)
-            .subcommand(SubCommand::with_name("id")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(Command::new("id")
                 .about("Read SPI flash ID"))
-            .subcommand(SubCommand::with_name("scan")
+            .subcommand(Command::new("scan")
                 .about("Read SPI flash parameters"))
-            .subcommand(SubCommand::with_name("erase")
+            .subcommand(Command::new("erase")
                 .about("Erase entire SPI flash"))
-            .subcommand(SubCommand::with_name("write")
+            .subcommand(Command::new("write")
                 .about("Write binary file to SPI flash")
-                .arg(Arg::with_name("file")
+                .arg(Arg::new("file")
                      .help("File to write to SPI flash")
                      .required(true))
-                .arg(Arg::with_name("offset")
+                .arg(Arg::new("offset")
                      .help("Start address (in bytes) to write to")
                      .long("offset")
+                     .value_parser(value_parser!(u32))
                      .default_value("0"))
-                .arg(Arg::with_name("no-verify")
+                .arg(Arg::new("no-verify")
                      .help("Disable readback verification")
                      .short('n')
-                     .long("no-verify"))
-                .arg(Arg::with_name("no-reload")
+                     .long("no-verify")
+                     .action(ArgAction::SetTrue))
+                .arg(Arg::new("no-reload")
                      .help("Don't request the ECP5 reload configuration after programming")
-                     .long("no-reload")))
-            .subcommand(SubCommand::with_name("read")
+                     .long("no-reload")
+                     .action(ArgAction::SetTrue)))
+            .subcommand(Command::new("read")
                 .about("Read SPI flash contents to file")
-                .arg(Arg::with_name("file")
+                .arg(Arg::new("file")
                      .help("File to write SPI flash contents to")
                      .required(true))
-                .arg(Arg::with_name("offset")
+                .arg(Arg::new("offset")
                      .help("Start address (in bytes) of read")
                      .long("offset")
-                     .takes_value(true)
+                     .action(ArgAction::Set)
+                     .value_parser(value_parser!(u32))
                      .default_value("0"))
-                .arg(Arg::with_name("length")
+                .arg(Arg::new("length")
                      .help("Length (in bytes) of read, defaults to detected capacity")
                      .long("length")
-                     .takes_value(true)))
-            .subcommand(SubCommand::with_name("protect")
+                     .action(ArgAction::Set)
+                     .value_parser(value_parser!(u32))))
+            .subcommand(Command::new("protect")
                 .about("Set all block protection bits in status register"))
-            .subcommand(SubCommand::with_name("unprotect")
+            .subcommand(Command::new("unprotect")
                 .about("Clear all block protection bits in status register"))
             )
         .get_matches();
 
     pretty_env_logger::init_timed();
     let t0 = Instant::now();
-    let quiet = matches.is_present("quiet");
+    let quiet = matches.get_flag("quiet");
 
     // Listing probes does not require first connecting to a probe,
     // so we just list them and quit early.
@@ -133,8 +138,8 @@ fn main() -> anyhow::Result<()> {
 
     // All functions after this point require an open probe, so
     // we now attempt to connect to the specified probe.
-    let probe = if matches.is_present("probe") {
-        ProbeInfo::from_specifier(matches.value_of("probe").unwrap())?.open()?
+    let probe = if let Some(probe) = matches.get_one::<String>("probe") {
+        ProbeInfo::from_specifier(probe)?.open()?
     } else {
         Probe::new()?
     };
@@ -150,35 +155,19 @@ fn main() -> anyhow::Result<()> {
     }
 
     // If the user specified a JTAG clock frequency, apply it now.
-    match value_t!(matches, "freq", u32) {
-        Ok(freq) => jtag.set_clock(freq * 1000)?,
-        Err(e) => {
-            drop(jtag);
-            e.exit();
-        }
+    if let Some(&freq) = matches.get_one::<u32>("freq") {
+        jtag.set_clock(freq * 1000)?;
     }
 
     // If the user specified a JTAG scan chain length, apply it now.
-    match value_t!(matches, "scan-chain-length", usize) {
-        Ok(max_length) => jtag.set_max_length(max_length),
-        Err(e) => {
-            drop(jtag);
-            e.exit();
-        }
+    if let Some(&max_length) = matches.get_one("scan-chain-length") {
+        jtag.set_max_length(max_length);
     }
 
     // If the user specified IR lengths, parse and save them.
-    let ir_lens = if matches.is_present("ir-lengths") {
-        match values_t!(matches, "ir-lengths", usize) {
-            Ok(lengths) => Some(lengths),
-            Err(e) => {
-                drop(jtag);
-                e.exit();
-            }
-        }
-    } else {
-        None
-    };
+    let ir_lens = matches
+        .get_many("ir-lengths")
+        .map(|lens| lens.copied().collect::<Vec<usize>>());
 
     // Scan the JTAG chain to detect all available TAPs.
     let chain = jtag.scan(ir_lens.as_deref())?;
@@ -191,28 +180,19 @@ fn main() -> anyhow::Result<()> {
 
     // If the user specified a TAP, we'll use it, but otherwise
     // attempt to find a single ECP5 in the scan chain.
-    let tap_idx = if matches.is_present("tap") {
-        match value_t!(matches, "tap", usize) {
-            Ok(tap) => if check_tap_idx(&chain, tap) {
-                log::debug!("Provided tap index is an ECP5");
-                tap
-            } else {
-                print_jtag_chain(&chain);
-                bail!("The provided tap index {} does not have an ECP5 IDCODE.", tap);
-            },
-            Err(e) => {
-                drop(jtag);
-                e.exit();
-            }
+    let tap_idx = if let Some(&tap_idx) = matches.get_one("tap") {
+        if check_tap_idx(&chain, tap_idx) {
+            log::debug!("Provided tap index is an ECP5");
+            tap_idx
+        } else {
+            print_jtag_chain(&chain);
+            bail!("The provided tap index {tap_idx} does not have an ECP5 IDCODE.");
         }
+    } else if let Some(index) = auto_tap_idx(&chain) {
+        index
     } else {
-        match auto_tap_idx(&chain) {
-            Some(index) => index,
-            None => {
-                print_jtag_chain(&chain);
-                bail!("Could not find an ECP5 IDCODE in the JTAG chain.");
-            }
-        }
+        print_jtag_chain(&chain);
+        bail!("Could not find an ECP5 IDCODE in the JTAG chain.");
     };
 
     // Create a TAP instance, consuming the JTAG instance.
@@ -229,7 +209,7 @@ fn main() -> anyhow::Result<()> {
         },
         Some("program") => {
             let matches = matches.subcommand_matches("program").unwrap();
-            let path = matches.value_of("file").unwrap();
+            let path = matches.get_one::<String>("file").unwrap();
             let mut file = File::open(path)?;
             let mut data = Vec::new();
             file.read_to_end(&mut data)?;
@@ -285,10 +265,10 @@ fn main() -> anyhow::Result<()> {
                         println!("Flash appears to be write-protected; writing may fail.");
                     }
                     let matches = matches.subcommand_matches("write").unwrap();
-                    let path = matches.value_of("file").unwrap();
-                    let offset = value_t!(matches, "offset", u32).unwrap();
-                    let verify = !matches.is_present("no-verify");
-                    let reload = !matches.is_present("no-reload");
+                    let path = matches.get_one::<String>("file").unwrap();
+                    let offset = *matches.get_one("offset").unwrap();
+                    let verify = !matches.get_flag("no-verify");
+                    let reload = !matches.get_flag("no-reload");
                     let mut file = File::open(path)?;
                     let mut data = Vec::new();
                     file.read_to_end(&mut data)?;
@@ -304,17 +284,16 @@ fn main() -> anyhow::Result<()> {
                 },
                 Some("read") => {
                     let matches = matches.subcommand_matches("read").unwrap();
-                    let path = matches.value_of("file").unwrap();
-                    let offset = value_t!(matches, "offset", u32).unwrap();
-                    let length = if matches.is_present("length") {
-                        value_t!(matches, "length", usize).unwrap()
+                    let path = matches.get_one::<String>("file").unwrap();
+                    let offset = *matches.get_one("offset").unwrap();
+                    let length = if let Some(length) = matches.get_one("length") {
+                        *length
                     } else {
                         log::info!("No length specified, autodetecting");
                         if let Some(capacity) = flash.capacity() {
                             capacity
                         } else {
-                            println!("Could not detect flash capacity; specify --length instead.");
-                            return Ok(());
+                            bail!("Could not detect flash capacity; specify --length instead.");
                         }
                     };
                     let mut file = File::create(path)?;
