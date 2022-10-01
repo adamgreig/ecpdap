@@ -4,7 +4,7 @@
 use nom::{
     IResult,
     sequence::{preceded, delimited, tuple},
-    combinator::map,
+    combinator::{map, value},
     branch::alt,
     multi::many1,
     number::complete::{be_u8, be_u16, be_u32, be_u64},
@@ -93,11 +93,11 @@ fn comment(input: &[u8]) -> IResult<&[u8], &[u8]> {
 }
 
 fn preamble(input: &[u8]) -> IResult<&[u8], ()> {
-    map(tag([0xFF, 0xFF, 0xBD, 0xB3]), |_| ())(input)
+    value((), tag([0xFF, 0xFF, 0xBD, 0xB3]))(input)
 }
 
 fn dummy(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(tag([0xFF]), |_| BitstreamCommand::Dummy)(input)
+    value(BitstreamCommand::Dummy, tag([0xFF]))(input)
 }
 
 fn verify_id(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
@@ -119,16 +119,16 @@ fn spi_mode(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
 }
 
 fn jump(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
+    value(
+        BitstreamCommand::Jump,
         preceded(BitstreamCommandId::JUMP.tag_zeros(), be_u32),
-        |_| BitstreamCommand::Jump,
     )(input)
 }
 
 fn lsc_reset_crc(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
+    value(
+        BitstreamCommand::ResetCrc,
         BitstreamCommandId::LSC_RESET_CRC.tag_zeros(),
-        |_| BitstreamCommand::ResetCrc
     )(input)
 }
 
@@ -147,9 +147,9 @@ fn lsc_prog_cntrl0(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
 }
 
 fn lsc_init_address(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
+    value(
+        BitstreamCommand::InitAddress,
         BitstreamCommandId::LSC_INIT_ADDRESS.tag_zeros(),
-        |_| BitstreamCommand::InitAddress,
     )(input)
 }
 
@@ -175,9 +175,9 @@ fn isc_program_usercode(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
 }
 
 fn isc_program_done(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
+    value(
+        BitstreamCommand::ProgDone,
         BitstreamCommandId::ISC_PROGRAM_DONE.tag_zeros(),
-        |_| BitstreamCommand::ProgDone,
     )(input)
 }
 
