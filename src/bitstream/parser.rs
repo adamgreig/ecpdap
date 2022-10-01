@@ -10,6 +10,7 @@ use nom::{
     number::complete::{be_u8, be_u16, be_u32, be_u64},
     bytes::complete::{tag, take, take_until},
 };
+use super::crc16;
 
 /// Commands found in the bitstream.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -41,8 +42,8 @@ impl BitstreamCommandId {
         tag([self as u8])
     }
 
-    /// Returns a parser for this command ID followed by three 0s.
-    fn tag_zeros<'a>(self) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], &'a [u8]> {
+    /// Returns a parser for this command ID followed by three 0 bytes.
+    fn tag_with_zeros<'a>(self) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], &'a [u8]> {
         tag([self as u8, 0, 0, 0])
     }
 }
@@ -59,24 +60,32 @@ struct ConfigData {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct EbrFrame {
+    frame_count: u16,
+    frames: Vec<[u8; 9]>,
+}
+
+type MaybeCrc = Option<u16>;
+
+#[derive(Clone, Debug, PartialEq)]
 enum BitstreamCommand {
     Dummy,
     VerifyId(u32),
     SpiMode(u8),
     Jump,
     ResetCrc,
-    WriteCompDic([u8; 8]),
+    WriteCompDic(([u8; 8], MaybeCrc)),
     ProgCntrl0(u32),
     InitAddress,
     WriteAddress(u32),
     ProgSecurity(u32),
-    ProgUsercode(u32),
+    ProgUsercode((u32, MaybeCrc)),
     ProgDone,
-    ProgIncrRti(ConfigData),
-    ProgIncrCmp(ConfigData),
+    ProgIncrRti((ConfigData, MaybeCrc)),
+    ProgIncrCmp((ConfigData, MaybeCrc)),
     ProgSedCrc,
     EbrAddress(u32),
-    EbrWrite,
+    EbrWrite((EbrFrame, MaybeCrc)),
 }
 
 struct Bitstream {
@@ -102,7 +111,7 @@ fn dummy(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
 
 fn verify_id(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
     map(
-        preceded(BitstreamCommandId::VERIFY_ID.tag_zeros(), be_u32),
+        preceded(BitstreamCommandId::VERIFY_ID.tag_with_zeros(), be_u32),
         |idcode: u32| BitstreamCommand::VerifyId(idcode),
     )(input)
 }
@@ -121,27 +130,39 @@ fn spi_mode(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
 fn jump(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
     value(
         BitstreamCommand::Jump,
-        preceded(BitstreamCommandId::JUMP.tag_zeros(), be_u32),
+        preceded(BitstreamCommandId::JUMP.tag_with_zeros(), be_u32),
     )(input)
 }
 
 fn lsc_reset_crc(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
     value(
         BitstreamCommand::ResetCrc,
-        BitstreamCommandId::LSC_RESET_CRC.tag_zeros(),
+        BitstreamCommandId::LSC_RESET_CRC.tag_with_zeros(),
     )(input)
 }
 
 fn lsc_write_comp_dic(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
-        preceded(BitstreamCommandId::LSC_WRITE_COMP_DIC.tag_zeros(), be_u64),
-        |dict| BitstreamCommand::WriteCompDic(dict.to_le_bytes()),
-    )(input)
+    let (left, (check_crc, dict)) = tuple((
+        delimited(
+            BitstreamCommandId::LSC_WRITE_COMP_DIC.tag(),
+            be_u8,
+            tag(&[0, 0]),
+        ),
+        be_u64,
+    ))(input)?;
+
+    let (left, crc) = if (check_crc & 0x80) != 0 {
+        be_u16(left).map(|(left, crc)| (left, Some(crc)))?
+    } else {
+        (left, None)
+    };
+
+    Ok((left, BitstreamCommand::WriteCompDic((dict.to_le_bytes(), crc))))
 }
 
 fn lsc_prog_cntrl0(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
     map(
-        preceded(BitstreamCommandId::LSC_PROG_CNTRL0.tag_zeros(), be_u32),
+        preceded(BitstreamCommandId::LSC_PROG_CNTRL0.tag_with_zeros(), be_u32),
         |c0| BitstreamCommand::ProgCntrl0(c0),
     )(input)
 }
@@ -149,35 +170,35 @@ fn lsc_prog_cntrl0(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
 fn lsc_init_address(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
     value(
         BitstreamCommand::InitAddress,
-        BitstreamCommandId::LSC_INIT_ADDRESS.tag_zeros(),
+        BitstreamCommandId::LSC_INIT_ADDRESS.tag_with_zeros(),
     )(input)
 }
 
 fn lsc_write_address(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
     map(
-        preceded(BitstreamCommandId::LSC_WRITE_ADDRESS.tag_zeros(), be_u32),
+        preceded(BitstreamCommandId::LSC_WRITE_ADDRESS.tag_with_zeros(), be_u32),
         |addr| BitstreamCommand::WriteAddress(addr),
     )(input)
 }
 
 fn isc_program_security(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
     map(
-        preceded(BitstreamCommandId::ISC_PROGRAM_SECURITY.tag_zeros(), be_u32),
+        preceded(BitstreamCommandId::ISC_PROGRAM_SECURITY.tag_with_zeros(), be_u32),
         |security| BitstreamCommand::ProgSecurity(security),
     )(input)
 }
 
 fn isc_program_usercode(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
     map(
-        preceded(BitstreamCommandId::ISC_PROGRAM_USERCODE.tag_zeros(), be_u32),
-        |usercode| BitstreamCommand::ProgUsercode(usercode),
+        preceded(BitstreamCommandId::ISC_PROGRAM_USERCODE.tag_with_zeros(), be_u32),
+        |usercode| BitstreamCommand::ProgUsercode((usercode, None)),
     )(input)
 }
 
 fn isc_program_done(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
     value(
         BitstreamCommand::ProgDone,
-        BitstreamCommandId::ISC_PROGRAM_DONE.tag_zeros(),
+        BitstreamCommandId::ISC_PROGRAM_DONE.tag_with_zeros(),
     )(input)
 }
 
@@ -196,7 +217,7 @@ fn lsc_prog_sed_crc(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
 
 fn lsc_ebr_address(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
     map(
-        preceded(BitstreamCommandId::LSC_EBR_ADDRESS.tag_zeros(), be_u32),
+        preceded(BitstreamCommandId::LSC_EBR_ADDRESS.tag_with_zeros(), be_u32),
         |addr| BitstreamCommand::EbrAddress(addr),
     )(input)
 }
@@ -241,13 +262,11 @@ fn bitstream(input: &[u8]) -> IResult<&[u8], Bitstream> {
 }
 
 // TODO:
-// 1. Add tests for remaining command parsers
 // 2. Work out how to handle CRCs:
-//      * Write CRC calculator
-//      * Add CRC bytes to commands that may have them
-//      * Ideally make this conditional on the CRC bit being set
 //      * Need to compute running CRCs of all data until we get to a CRC/reset
 //      * Need to error on bad CRCs
+//      * maybe 'consumed()' and 'verify()' will be useful
+//      * maybe we can cache bits/indices of input and actually check crcs after parsing
 //  3. Implement the ebr_write variable-length business
 //  4. Implement the uncompressed data frame handling
 //  5. Implement the compressed data frame handling.
@@ -301,8 +320,18 @@ mod tests {
 
     #[test]
     fn test_lsc_write_comp_dic() {
+        // Test without CRC presence bit set.
         assert_eq!(lsc_write_comp_dic(b"\x02\x00\x00\x0076543210left"),
-                   Ok((&b"left"[..], BitstreamCommand::WriteCompDic(*b"01234567"))));
+                   Ok((&b"left"[..], BitstreamCommand::WriteCompDic((*b"01234567", None)))));
+
+        // Test with CRC presence bit set.
+        assert_eq!(
+            lsc_write_comp_dic(b"\x02\x80\x00\x0076543210\xAB\xCDleft"),
+            Ok((
+                 &b"left"[..],
+                 BitstreamCommand::WriteCompDic((*b"01234567", Some(0xABCD)))
+            ))
+        );
     }
 
     #[test]
@@ -321,5 +350,29 @@ mod tests {
     fn test_lsc_write_address() {
         assert_eq!(lsc_write_address(b"\xB4\x00\x00\x00\x12\x34\x56\x78left"),
                    Ok((&b"left"[..], BitstreamCommand::WriteAddress(0x12345678))));
+    }
+
+    #[test]
+    fn test_isc_program_security() {
+        assert_eq!(isc_program_security(b"\xCE\x00\x00\x00\x12\x34\x56\x78left"),
+                   Ok((&b"left"[..], BitstreamCommand::ProgSecurity(0x12345678))));
+    }
+
+    #[test]
+    fn test_isc_program_usercode() {
+        assert_eq!(isc_program_usercode(b"\xC2\x00\x00\x00\x12\x34\x56\x78left"),
+                   Ok((&b"left"[..], BitstreamCommand::ProgUsercode((0x12345678, None)))));
+    }
+
+    #[test]
+    fn test_isc_program_done() {
+        assert_eq!(isc_program_done(b"\x5E\x00\x00\x00left"),
+                   Ok((&b"left"[..], BitstreamCommand::ProgDone)));
+    }
+
+    #[test]
+    fn test_lsc_ebr_address() {
+        assert_eq!(lsc_ebr_address(b"\xF6\x00\x00\x00\x12\x34\x56\x78left"),
+                   Ok((&b"left"[..], BitstreamCommand::EbrAddress(0x12345678))));
     }
 }
