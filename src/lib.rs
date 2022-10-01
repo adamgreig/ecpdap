@@ -69,6 +69,10 @@ impl ECP5IDCODE {
         Self::try_from(idcode.0).ok()
     }
 
+    pub fn try_from_u32(idcode: u32) -> Option<Self> {
+        Self::try_from_idcode(&IDCODE(idcode))
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             ECP5IDCODE::LFE5U_12 => "LFE5U-12",
@@ -99,16 +103,44 @@ impl ECP5IDCODE {
         let lfe5u_45 = &[LFE5U_45, LFE5UM_45, LFE5UM5G_45];
         let lfe5u_85 = &[LFE5U_85, LFE5UM_85, LFE5UM5G_85];
         match self {
-            ECP5IDCODE::LFE5U_12 => lfe5u_25.contains(other),
-            ECP5IDCODE::LFE5U_25 => lfe5u_25.contains(other),
-            ECP5IDCODE::LFE5U_45 => lfe5u_45.contains(other),
-            ECP5IDCODE::LFE5U_85 => lfe5u_85.contains(other),
-            ECP5IDCODE::LFE5UM_25 => lfe5u_25.contains(other),
-            ECP5IDCODE::LFE5UM_45 => lfe5u_45.contains(other),
-            ECP5IDCODE::LFE5UM_85 => lfe5u_85.contains(other),
-            ECP5IDCODE::LFE5UM5G_25 => lfe5u_25.contains(other),
-            ECP5IDCODE::LFE5UM5G_45 => lfe5u_45.contains(other),
-            ECP5IDCODE::LFE5UM5G_85 => lfe5u_85.contains(other),
+            ECP5IDCODE::LFE5U_25
+             | ECP5IDCODE::LFE5UM_25
+             | ECP5IDCODE::LFE5UM5G_25
+             | ECP5IDCODE::LFE5U_12
+            => lfe5u_25.contains(other),
+
+            ECP5IDCODE::LFE5U_45
+             | ECP5IDCODE::LFE5UM_45
+             | ECP5IDCODE::LFE5UM5G_45
+            => lfe5u_45.contains(other),
+
+            ECP5IDCODE::LFE5U_85
+             | ECP5IDCODE::LFE5UM_85
+             | ECP5IDCODE::LFE5UM5G_85
+            => lfe5u_85.contains(other),
+        }
+    }
+
+    /// Number of configuration bits per frame.
+    ///
+    /// Returns (pad_bits_before_frame, bits_per_frame, pad_bits_after_frame).
+    pub fn config_bits_per_frame(&self) -> (usize, usize, usize) {
+        match self {
+            ECP5IDCODE::LFE5U_25
+              | ECP5IDCODE::LFE5UM_25
+              | ECP5IDCODE::LFE5UM5G_25
+              | ECP5IDCODE::LFE5U_12
+            => (0, 592, 0),
+
+            ECP5IDCODE::LFE5U_45
+              | ECP5IDCODE::LFE5UM_45
+              | ECP5IDCODE::LFE5UM5G_45
+            => (2, 846, 0),
+
+            ECP5IDCODE::LFE5U_85
+              | ECP5IDCODE::LFE5UM_85
+              | ECP5IDCODE::LFE5UM5G_85
+            => (0, 1136, 0),
         }
     }
 }
