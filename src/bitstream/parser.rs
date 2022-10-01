@@ -1,21 +1,15 @@
 // Copyright 2022 Adam Greig
 // Licensed under the Apache-2.0 and MIT licenses.
 
-use nom::{
-    IResult,
-    sequence::{preceded, delimited, tuple},
-    combinator::{map, value},
-    branch::alt,
-    multi::many1,
-    number::complete::{be_u8, be_u16, be_u32, be_u64},
-    bytes::complete::{tag, take, take_until},
-};
+use std::convert::{TryFrom, TryInto};
+use num_enum::TryFromPrimitive;
+use crate::ECP5IDCODE;
 use super::crc16;
 
 /// Commands found in the bitstream.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, TryFromPrimitive)]
 #[allow(non_camel_case_types)]
-#[repr(u32)]
+#[repr(u8)]
 enum BitstreamCommandId {
     DUMMY               = 0xFF,
     VERIFY_ID           = 0xE2,
@@ -36,343 +30,429 @@ enum BitstreamCommandId {
     LSC_EBR_WRITE       = 0xB2,
 }
 
-impl BitstreamCommandId {
-    /// Returns a parser for this command ID.
-    fn tag<'a>(self) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], &'a [u8]> {
-        tag([self as u8])
+/// VERIFY_ID command in bitstream.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) struct VerifyId {
+    /// IDCODE to validate against.
+    idcode: u32,
+
+    /// Offset of first byte of IDCODE.
+    offset: usize,
+}
+
+/// SPI_MODE command in bitstream.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) struct SpiMode {
+    /// Offset of byte containing the SPI mode.
+    offset: usize,
+}
+
+/// CRC stored in bitstream.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) struct StoredCrc {
+    /// Offset of first byte covered by this CRC.
+    start: usize,
+
+    /// Offset of first byte of CRC.
+    pos: usize,
+
+    /// CRC check value.
+    crc: u16,
+}
+
+/// Relevant metadata parsed from a bitstream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct BitstreamMeta {
+    verify_id: Option<VerifyId>,
+    spi_mode: Option<SpiMode>,
+    stored_crcs: Vec<StoredCrc>,
+    comp_dict: Option<[u8; 8]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum ParseError {
+    Exhausted,
+    NoComment,
+    NoPreamble,
+    InvalidCrc { expected: u16, got: u16 },
+    BadCheck { expected: Vec<u8>, got: Vec<u8> },
+    NoVerifyId,
+    UnknownIdcode(u32),
+    NoCompDict,
+    UnknownCommand(u8),
+}
+
+struct Reader<'a> {
+    data: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(data: &'a [u8]) -> Reader<'a> {
+        Self { data, offset: 0 }
     }
 
-    /// Returns a parser for this command ID followed by three 0 bytes.
-    fn tag_with_zeros<'a>(self) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], &'a [u8]> {
-        tag([self as u8, 0, 0, 0])
+    /// Return original input.
+    fn input(&self) -> &[u8] {
+        self.data
     }
-}
 
-#[derive(Clone, Debug, PartialEq)]
-struct ConfigData {
-    crc: bool,
-    crc_at_end: bool,
-    use_dummy_bits: bool,
-    use_dummy_bytes: bool,
-    num_dummy_bytes: u8,
-    num_frames: u16,
-    frames: Vec<Vec<u8>>,
-}
+    /// Fetch current offset, which is the position of the next byte to be read.
+    fn offset(&self) -> usize {
+        self.offset
+    }
 
-#[derive(Clone, Debug, PartialEq)]
-struct EbrFrame {
-    frame_count: u16,
-    frames: Vec<[u8; 9]>,
-}
+    /// Fetch next byte to be read, incrementing internal offset.
+    fn next(&mut self) -> Result<u8, ParseError> {
+        let x = self.data.get(self.offset).copied().ok_or(ParseError::Exhausted);
+        self.offset += 1;
+        x
+    }
 
-type MaybeCrc = Option<u16>;
+    /// Look at next byte without consuming it.
+    fn peek(&self) -> Result<u8, ParseError> {
+        self.data.get(self.offset).copied().ok_or(ParseError::Exhausted)
+    }
 
-#[derive(Clone, Debug, PartialEq)]
-enum BitstreamCommand {
-    Dummy,
-    VerifyId(u32),
-    SpiMode(u8),
-    Jump,
-    ResetCrc,
-    WriteCompDic(([u8; 8], MaybeCrc)),
-    ProgCntrl0(u32),
-    InitAddress,
-    WriteAddress(u32),
-    ProgSecurity(u32),
-    ProgUsercode((u32, MaybeCrc)),
-    ProgDone,
-    ProgIncrRti((ConfigData, MaybeCrc)),
-    ProgIncrCmp((ConfigData, MaybeCrc)),
-    ProgSedCrc,
-    EbrAddress(u32),
-    EbrWrite((EbrFrame, MaybeCrc)),
-}
+    /// Look at next n bytes without consuming them.
+    fn peek_n(&self, n: usize) -> Result<&[u8], ParseError> {
+        self.data.get(self.offset..(self.offset + n)).ok_or(ParseError::Exhausted)
+    }
 
-struct Bitstream {
-    comment: Vec<u8>,
-    commands: Vec<BitstreamCommand>,
-}
-
-fn comment(input: &[u8]) -> IResult<&[u8], &[u8]> {
-    delimited(
-        tag([0xFF, 0x00]),
-        take_until(&[0x00][..]),
-        tag([0x00, 0xFF])
-    )(input)
-}
-
-fn preamble(input: &[u8]) -> IResult<&[u8], ()> {
-    value((), tag([0xFF, 0xFF, 0xBD, 0xB3]))(input)
-}
-
-fn dummy(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    value(BitstreamCommand::Dummy, tag([0xFF]))(input)
-}
-
-fn verify_id(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
-        preceded(BitstreamCommandId::VERIFY_ID.tag_with_zeros(), be_u32),
-        |idcode: u32| BitstreamCommand::VerifyId(idcode),
-    )(input)
-}
-
-fn spi_mode(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
-        delimited(
-            BitstreamCommandId::SPI_MODE.tag(),
-            be_u8,
-            tag([0, 0])
-        ),
-        |mode: u8| BitstreamCommand::SpiMode(mode),
-    )(input)
-}
-
-fn jump(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    value(
-        BitstreamCommand::Jump,
-        preceded(BitstreamCommandId::JUMP.tag_with_zeros(), be_u32),
-    )(input)
-}
-
-fn lsc_reset_crc(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    value(
-        BitstreamCommand::ResetCrc,
-        BitstreamCommandId::LSC_RESET_CRC.tag_with_zeros(),
-    )(input)
-}
-
-fn lsc_write_comp_dic(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    let (left, (check_crc, dict)) = tuple((
-        delimited(
-            BitstreamCommandId::LSC_WRITE_COMP_DIC.tag(),
-            be_u8,
-            tag(&[0, 0]),
-        ),
-        be_u64,
-    ))(input)?;
-
-    let (left, crc) = if (check_crc & 0x80) != 0 {
-        be_u16(left).map(|(left, crc)| (left, Some(crc)))?
-    } else {
-        (left, None)
-    };
-
-    Ok((left, BitstreamCommand::WriteCompDic((dict.to_le_bytes(), crc))))
-}
-
-fn lsc_prog_cntrl0(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
-        preceded(BitstreamCommandId::LSC_PROG_CNTRL0.tag_with_zeros(), be_u32),
-        |c0| BitstreamCommand::ProgCntrl0(c0),
-    )(input)
-}
-
-fn lsc_init_address(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    value(
-        BitstreamCommand::InitAddress,
-        BitstreamCommandId::LSC_INIT_ADDRESS.tag_with_zeros(),
-    )(input)
-}
-
-fn lsc_write_address(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
-        preceded(BitstreamCommandId::LSC_WRITE_ADDRESS.tag_with_zeros(), be_u32),
-        |addr| BitstreamCommand::WriteAddress(addr),
-    )(input)
-}
-
-fn isc_program_security(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
-        preceded(BitstreamCommandId::ISC_PROGRAM_SECURITY.tag_with_zeros(), be_u32),
-        |security| BitstreamCommand::ProgSecurity(security),
-    )(input)
-}
-
-fn isc_program_usercode(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
-        preceded(BitstreamCommandId::ISC_PROGRAM_USERCODE.tag_with_zeros(), be_u32),
-        |usercode| BitstreamCommand::ProgUsercode((usercode, None)),
-    )(input)
-}
-
-fn isc_program_done(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    value(
-        BitstreamCommand::ProgDone,
-        BitstreamCommandId::ISC_PROGRAM_DONE.tag_with_zeros(),
-    )(input)
-}
-
-fn lsc_prog_incr_rti(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    todo!()
-}
-
-fn lsc_prog_incr_cmp(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    todo!()
-}
-
-fn lsc_prog_sed_crc(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    // Format uncertain. Seems to be 12 bytes total, i.e. command, 3 bytes params, 8 bytes data.
-    todo!()
-}
-
-fn lsc_ebr_address(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    map(
-        preceded(BitstreamCommandId::LSC_EBR_ADDRESS.tag_with_zeros(), be_u32),
-        |addr| BitstreamCommand::EbrAddress(addr),
-    )(input)
-}
-
-fn lsc_ebr_write(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    // command, byte with CRC, two bytes with number of frames
-    // each frame is then 9 bytes
-    // followed by CRC at end
-    todo!()
-}
-
-fn bitstream_command(input: &[u8]) -> IResult<&[u8], BitstreamCommand> {
-    alt((
-        dummy,
-        verify_id,
-        spi_mode,
-        jump,
-        lsc_reset_crc,
-        lsc_write_comp_dic,
-        lsc_prog_cntrl0,
-        lsc_init_address,
-        lsc_write_address,
-        isc_program_security,
-        isc_program_usercode,
-        isc_program_done,
-        lsc_prog_incr_rti,
-        lsc_prog_incr_cmp,
-        lsc_prog_sed_crc,
-        lsc_ebr_address,
-        lsc_ebr_write,
-    ))(input)
-}
-
-fn bitstream(input: &[u8]) -> IResult<&[u8], Bitstream> {
-    map(
-        tuple((comment, preamble, many1(bitstream_command))),
-        |(comment, _, commands)| Bitstream {
-            comment: comment.iter().copied().collect(),
-            commands
+    /// Skip `n` bytes.
+    fn skip(&mut self, n: usize) -> Result<(), ParseError> {
+        self.offset += n;
+        if self.offset <= self.data.len() {
+            Ok(())
+        } else {
+            Err(ParseError::Exhausted)
         }
-    )(input)
+    }
+
+    /// Skip until specific byte will be returned next.
+    fn skip_to(&mut self, x: u8) -> Result<(), ParseError> {
+        while self.offset < self.data.len() && self.data[self.offset] != x {
+            self.offset += 1;
+        }
+
+        if self.eof() {
+            Err(ParseError::Exhausted)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Verify the next bytes match the provided slice and skip them.
+    fn check_skip(&mut self, x: &[u8]) -> Result<(), ParseError> {
+        let data = self.peek_n(x.len())?;
+        if data != x {
+            Err(ParseError::BadCheck { expected: x.to_vec(), got: data.to_vec() })
+        } else {
+            self.skip(x.len())?;
+            Ok(())
+        }
+    }
+
+    /// Take constant `n` bytes, returning an array reference.
+    fn take<const N: usize>(&mut self) -> Result<&[u8; N], ParseError> {
+        self.offset += N;
+        self.data.get(self.offset - N..self.offset)
+                 .map(|d| d.try_into().unwrap())
+                 .ok_or(ParseError::Exhausted)
+    }
+
+    /// Read compressed bytes according to the ECP5 bitstream compression.
+    ///
+    /// Returns exactly `n` decompressed bytes or an error.
+    fn read_compressed(&mut self, n: usize, dict: &[u8; 8]) -> Result<Vec<u8>, ParseError> {
+        let mut out = Vec::with_capacity(n);
+        let mut bits = BitReader::new();
+
+        for _ in 0..n {
+            if bits.bit(self)? == 0 {
+                // Code 0 represents a whole 0 byte of input.
+                out.push(0);
+            } else {
+                if bits.bit(self)? == 0 {
+                    if bits.bit(self)? == 0 {
+                        let pos = bits.bits(self, 3)? as u8;
+                        // Code 100xxx is a single set-bit position.
+                        out.push(1 << pos);
+                    } else {
+                        // Code 101xxx is a stored byte.
+                        let idx = bits.bits(self, 3)? as usize;
+                        out.push(dict[idx]);
+                    }
+                } else {
+                    // Code 11xxxxxxxx is a literal byte.
+                    let byte = bits.bits(self, 8)?;
+                    out.push(byte as u8);
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Check if internal offset is now at the end of the input data.
+    fn eof(&self) -> bool {
+        self.offset >= self.data.len()
+    }
 }
 
-// TODO:
-// 2. Work out how to handle CRCs:
-//      * Need to compute running CRCs of all data until we get to a CRC/reset
-//      * Need to error on bad CRCs
-//      * maybe 'consumed()' and 'verify()' will be useful
-//      * maybe we can cache bits/indices of input and actually check crcs after parsing
-//  3. Implement the ebr_write variable-length business
-//  4. Implement the uncompressed data frame handling
-//  5. Implement the compressed data frame handling.
-//      * Need to somehow access the compression dictionary from earlier
-//      * Use nom's bit handling methods
-//  6. More tests.
+struct BitReader {
+    bits: u32,
+    bits_left: usize,
+}
+
+impl BitReader {
+    fn new() -> Self {
+        BitReader { bits: 0, bits_left: 0 }
+    }
+
+    fn bit(&mut self, rd: &mut Reader) -> Result<u8, ParseError> {
+        if self.bits_left == 0 {
+            self.bits = rd.next()? as u32;
+            self.bits_left += 7;
+        }
+        Ok((self.bits >> (self.bits_left - 1)) as u8 & 1)
+    }
+
+    fn bits(&mut self, rd: &mut Reader, n: usize) -> Result<u32, ParseError> {
+        assert!(n <= 32);
+        while self.bits_left < n {
+            self.bits = (self.bits << 8) | (rd.next()? as u32);
+            self.bits_left += 8;
+        }
+        let bits = (self.bits >> (self.bits_left - 1 - n)) & ((1 << n) - 1);
+        self.bits_left -= n;
+        Ok(bits)
+    }
+}
+
+impl BitstreamMeta {
+    /// Parse the provided bitstream, extracting the relevant metadata.
+    pub fn parse(input: &[u8]) -> Result<Self, ParseError> {
+        let mut rd = Reader::new(input);
+
+        // Check start of comment block.
+        if rd.take()? != &[0xFF, 0x00] {
+            return Err(ParseError::NoComment);
+        }
+
+        // Skip through to end of comment block.
+        while rd.peek_n(2)? != &[0x00, 0xFF] {
+            rd.skip_to(0x00)?;
+        }
+        rd.skip(2)?;
+
+        // Check preamble.
+        if rd.take()? != &[0xFF, 0xFF, 0xBD, 0xB3] {
+            return Err(ParseError::NoPreamble);
+        }
+
+        let mut meta = BitstreamMeta {
+            verify_id: None,
+            spi_mode: None,
+            stored_crcs: Vec::new(),
+            comp_dict: None,
+        };
+        let mut crc_start = 0;
+
+        // Process commands.
+        loop {
+            match BitstreamCommandId::try_from(rd.next()?) {
+                Ok(BitstreamCommandId::DUMMY) => {},
+                Ok(BitstreamCommandId::VERIFY_ID) => {
+                    rd.check_skip(&[0, 0, 0])?;
+                    let offset = rd.offset();
+                    let idcode = u32::from_be_bytes(*rd.take()?);
+                    meta.verify_id = Some(VerifyId { idcode, offset });
+                },
+                Ok(BitstreamCommandId::SPI_MODE) => {
+                    let offset = rd.offset();
+                    let _mode = rd.next()?;
+                    rd.check_skip(&[0, 0])?;
+                    meta.spi_mode = Some(SpiMode { offset });
+                },
+                Ok(BitstreamCommandId::LSC_RESET_CRC) => {
+                    rd.check_skip(&[0, 0, 0])?;
+                    crc_start = rd.offset();
+                },
+                Ok(BitstreamCommandId::LSC_WRITE_COMP_DIC) => {
+                    let crc_check = rd.next()?;
+                    rd.check_skip(&[0, 0])?;
+                    meta.comp_dict = Some(u64::from_be_bytes(*rd.take()?).to_le_bytes());
+                    meta.maybe_check_crc(crc_check, &mut rd, &mut crc_start)?;
+                },
+                Ok(BitstreamCommandId::ISC_PROGRAM_USERCODE) => {
+                    let crc_check = rd.next()?;
+                    rd.check_skip(&[0, 0])?;
+                    rd.skip(4)?;
+                    meta.maybe_check_crc(crc_check, &mut rd, &mut crc_start)?;
+                },
+                Ok(BitstreamCommandId::JUMP)
+                    | Ok(BitstreamCommandId::LSC_PROG_CNTRL0)
+                    | Ok(BitstreamCommandId::LSC_WRITE_ADDRESS)
+                    | Ok(BitstreamCommandId::ISC_PROGRAM_SECURITY)
+                    | Ok(BitstreamCommandId::LSC_EBR_ADDRESS)
+                => {
+                    rd.check_skip(&[0, 0, 0])?;
+                    rd.skip(4)?;
+                },
+                Ok(BitstreamCommandId::LSC_INIT_ADDRESS)
+                    | Ok(BitstreamCommandId::ISC_PROGRAM_DONE)
+                => {
+                    rd.check_skip(&[0, 0, 0])?;
+                },
+                Ok(BitstreamCommandId::LSC_PROG_SED_CRC) => {
+                    rd.check_skip(&[0, 0, 0])?;
+                    rd.skip(8)?;
+                },
+                Ok(BitstreamCommandId::LSC_EBR_WRITE) => {
+                    let crc_check = rd.next()?;
+                    let num_frames = u16::from_be_bytes(*rd.take()?);
+                    for _ in 0..num_frames {
+                        rd.skip(9)?;
+                    }
+                    meta.maybe_check_crc(crc_check, &mut rd, &mut crc_start)?;
+                },
+                Ok(BitstreamCommandId::LSC_PROG_INCR_RTI) => {
+                    meta.read_frame(&mut rd, false, &mut crc_start)?;
+                },
+                Ok(BitstreamCommandId::LSC_PROG_INCR_CMP) => {
+                    meta.read_frame(&mut rd, true, &mut crc_start)?;
+                },
+                Err(e) => {
+                    return Err(ParseError::UnknownCommand(e.number));
+                },
+            }
+
+            // Stop looking for commands if we reached the end of the bitstream.
+            if rd.eof() {
+                break;
+            }
+        }
+
+        Ok(meta)
+    }
+
+    /// Verify a trailing CRC16 after a command/frame.
+    ///
+    /// Validates the CRC and updates `stored_crcs` as appropriate.
+    fn check_crc(&mut self, rd: &mut Reader, start: &mut usize)
+        -> Result<(), ParseError>
+    {
+        let pos = rd.offset();
+        let crc = u16::from_be_bytes(*rd.take()?);
+        let expected = crc16(&rd.input()[*start..pos]);
+        if expected != crc {
+            return Err(ParseError::InvalidCrc { expected, got: crc });
+        }
+        self.stored_crcs.push(StoredCrc { start: *start, pos, crc });
+        *start = rd.offset();
+        Ok(())
+    }
+
+    /// Conditionally verify a trailing CRC16 if set.
+    fn maybe_check_crc(&mut self, check: u8, rd: &mut Reader, start: &mut usize)
+        -> Result<(), ParseError>
+    {
+        if check & 0x80 != 0 {
+            self.check_crc(rd, start)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Read configuration frame data, which may be compressed.
+    ///
+    /// Requires `verify_id` to determine frame size, and if compressed, a `comp_dict`.
+    fn read_frame(&mut self, rd: &mut Reader, compressed: bool, crc_start: &mut usize)
+        -> Result<(), ParseError>
+    {
+        // Check we have an ID and (if required) a compression dictionary.
+        let id = self.verify_id.ok_or(ParseError::NoVerifyId)?.idcode;
+        let id = ECP5IDCODE::try_from_u32(id).ok_or(ParseError::UnknownIdcode(id))?;
+        let (pad_before, bits_per_frame, pad_after) = id.config_bits_per_frame();
+        if compressed && self.comp_dict.is_none() {
+            return Err(ParseError::NoCompDict);
+        }
+
+        // Work out size per frame.
+        let params = rd.next()?;
+        let check_crc = params & 0x80 != 0;
+        let crc_after_each = check_crc && (params & 0x40 == 0);
+        let use_dummy_bits = params & 0x20 == 0;
+        let use_dummy_bytes = params & 0x10 == 0;
+        let dummy_bytes = if use_dummy_bytes { params & 0x0F } else { 0 };
+        let frame_count = u16::from_be_bytes(*rd.take()?);
+        let mut bytes_per_frame = (pad_before + bits_per_frame + pad_after) / 8;
+        if compressed {
+            bytes_per_frame += 7 - ((bytes_per_frame - 1) % 8);
+        }
+
+        // Skip through frame data.
+        for i in 0..frame_count {
+            if compressed {
+                rd.read_compressed(bytes_per_frame, &self.comp_dict.unwrap())?;
+            } else {
+                rd.skip(bytes_per_frame)?;
+            }
+            if crc_after_each || (check_crc && i == frame_count - 1) {
+                self.check_crc(rd, crc_start)?;
+            }
+        }
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_comment() {
-        assert_eq!(comment(b"\xFF\x00This is a comment.\x00\xFFleft"),
-                   Ok((&b"left"[..], &b"This is a comment."[..])));
-    }
-
-    #[test]
-    fn test_preamble() {
-        assert_eq!(preamble(b"\xFF\xFF\xBD\xB3left"), Ok((&b"left"[..], ())));
-    }
-
-    #[test]
-    fn test_dummy() {
-        assert_eq!(dummy(b"\xFFleft"), Ok((&b"left"[..], BitstreamCommand::Dummy)));
-    }
-
-    #[test]
-    fn test_verify_id() {
-        assert_eq!(verify_id(b"\xE2\x00\x00\x00\x12\x34\x56\x78left"),
-                   Ok((&b"left"[..], BitstreamCommand::VerifyId(0x12345678))));
-    }
-
-    #[test]
-    fn test_spi_mode() {
-        assert_eq!(spi_mode(b"\x79\xAB\x00\x00left"),
-                   Ok((&b"left"[..], BitstreamCommand::SpiMode(0xAB))));
-    }
-
-    #[test]
-    fn test_jump() {
-        assert_eq!(jump(b"\x7E\x00\x00\x001234left"),
-                   Ok((&b"left"[..], BitstreamCommand::Jump)));
-    }
-
-    #[test]
-    fn test_lsc_reset_crc() {
-        assert_eq!(lsc_reset_crc(b"\x3B\x00\x00\x00left"),
-                   Ok((&b"left"[..], BitstreamCommand::ResetCrc)));
-    }
-
-    #[test]
-    fn test_lsc_write_comp_dic() {
-        // Test without CRC presence bit set.
-        assert_eq!(lsc_write_comp_dic(b"\x02\x00\x00\x0076543210left"),
-                   Ok((&b"left"[..], BitstreamCommand::WriteCompDic((*b"01234567", None)))));
-
-        // Test with CRC presence bit set.
+    fn test_no_comment() {
         assert_eq!(
-            lsc_write_comp_dic(b"\x02\x80\x00\x0076543210\xAB\xCDleft"),
-            Ok((
-                 &b"left"[..],
-                 BitstreamCommand::WriteCompDic((*b"01234567", Some(0xABCD)))
-            ))
+            BitstreamMeta::parse(&[
+                0xFF, 0xFF, 0xBD, 0xB3, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xE2, 0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78,
+                0xFF, 0xFF, 0xFF, 0xFF, 0x79, 0xAB, 0x00, 0x00,
+            ]),
+            Err(ParseError::NoComment),
         );
     }
 
     #[test]
-    fn test_lsc_prog_cntrl0() {
-        assert_eq!(lsc_prog_cntrl0(b"\x22\x00\x00\x00\x12\x34\x56\x78left"),
-                   Ok((&b"left"[..], BitstreamCommand::ProgCntrl0(0x12345678))));
+    fn test_no_preamble() {
+        assert_eq!(
+            BitstreamMeta::parse(&[
+                0xFF, 0x00, b'c', b'o', b'm', b'm', b'e', b'n', b't', 0x00, 0xFF,
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xE2, 0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78,
+                0xFF, 0xFF, 0xFF, 0xFF, 0x79, 0xAB, 0x00, 0x00,
+            ]),
+            Err(ParseError::NoPreamble),
+        );
     }
 
     #[test]
-    fn test_lsc_init_address() {
-        assert_eq!(lsc_init_address(b"\x46\x00\x00\x00left"),
-                   Ok((&b"left"[..], BitstreamCommand::InitAddress)));
-    }
-
-    #[test]
-    fn test_lsc_write_address() {
-        assert_eq!(lsc_write_address(b"\xB4\x00\x00\x00\x12\x34\x56\x78left"),
-                   Ok((&b"left"[..], BitstreamCommand::WriteAddress(0x12345678))));
-    }
-
-    #[test]
-    fn test_isc_program_security() {
-        assert_eq!(isc_program_security(b"\xCE\x00\x00\x00\x12\x34\x56\x78left"),
-                   Ok((&b"left"[..], BitstreamCommand::ProgSecurity(0x12345678))));
-    }
-
-    #[test]
-    fn test_isc_program_usercode() {
-        assert_eq!(isc_program_usercode(b"\xC2\x00\x00\x00\x12\x34\x56\x78left"),
-                   Ok((&b"left"[..], BitstreamCommand::ProgUsercode((0x12345678, None)))));
-    }
-
-    #[test]
-    fn test_isc_program_done() {
-        assert_eq!(isc_program_done(b"\x5E\x00\x00\x00left"),
-                   Ok((&b"left"[..], BitstreamCommand::ProgDone)));
-    }
-
-    #[test]
-    fn test_lsc_ebr_address() {
-        assert_eq!(lsc_ebr_address(b"\xF6\x00\x00\x00\x12\x34\x56\x78left"),
-                   Ok((&b"left"[..], BitstreamCommand::EbrAddress(0x12345678))));
+    fn test_parse_simple() {
+        assert_eq!(
+            BitstreamMeta::parse(&[
+                0xFF, 0x00, b'c', b'o', b'm', b'm', 0x00, 0xFF,
+                0xFF, 0xFF, 0xBD, 0xB3, 0xFF, 0xFF, 0xFF, 0xFF,
+                0x3B, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xE2, 0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78,
+                0xFF, 0xFF, 0xFF, 0xFF, 0x79, 0xAB, 0x00, 0x00,
+                0xC2, 0x80, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78, 0xE7, 0xF0,
+            ]),
+            Ok(BitstreamMeta {
+                verify_id: Some(VerifyId { idcode: 0x12345678, offset: 28 }),
+                spi_mode: Some(SpiMode { offset: 37 }),
+                stored_crcs: vec![ StoredCrc { start: 20, pos: 48, crc: 0xE7F0 } ],
+                comp_dict: None,
+            }),
+        );
     }
 }

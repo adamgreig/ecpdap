@@ -57,3 +57,29 @@ impl Bitstream {
         true
     }
 }
+
+/// Compute the ECP5 bitstream CRC16 over the provided input data.
+fn crc16(input: &[u8]) -> u16 {
+    let mut crc = 0;
+    for byte in input {
+        crc ^= (*byte as u16) << 8;
+        for _ in 0..8 {
+            if crc & 0x8000 != 0 {
+                crc = (crc << 1) ^ 0x8005;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_crc16() {
+        assert_eq!(crc16(b"123456789"), 0xFEE8);
+    }
+}
