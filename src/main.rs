@@ -73,6 +73,11 @@ fn main() -> anyhow::Result<()> {
             .long("remove-idcode")
             .action(ArgAction::SetTrue)
             .global(true))
+        .arg(Arg::new("remove-spimode")
+            .help("Disable removing SPI_MODE commands when writing bitstreams to SRAM")
+            .long("no-remove-spimode")
+            .action(ArgAction::SetFalse)
+            .global(true))
         .subcommand(Command::new("probes")
             .about("List available CMSIS-DAP probes"))
         .subcommand(Command::new("check")
@@ -164,14 +169,16 @@ fn main() -> anyhow::Result<()> {
         let mut bitstream = Bitstream::from_path(path)?;
         if matches.get_flag("remove-idcode") {
             bitstream.remove_idcode()?;
-        }
-        if let Some(device) = matches.get_one::<String>("device") {
+        } else if let Some(device) = matches.get_one::<String>("device") {
             if let Some(idcode) = ECP5IDCODE::try_from_name(&device) {
                 let fix = matches.get_flag("fix-idcode");
                 bitstream.check_and_fix_idcode(idcode, fix)?;
             } else {
                 bail!("Did not recognise device name {device}");
             }
+        }
+        if matches.get_flag("remove-spimode") {
+            bitstream.remove_spimode()?;
         }
         return Ok(());
     }
@@ -220,16 +227,16 @@ fn main() -> anyhow::Result<()> {
 
     // If the user specified a TAP, we'll use it, but otherwise
     // attempt to find a single ECP5 in the scan chain.
-    let tap_idx = if let Some(&tap_idx) = matches.get_one("tap") {
-        if check_tap_idx(&chain, tap_idx) {
+    let (tap_idx, idcode) = if let Some(&tap_idx) = matches.get_one("tap") {
+        if let Some(idcode) = check_tap_idx(&chain, tap_idx) {
             log::debug!("Provided tap index is an ECP5");
-            tap_idx
+            (tap_idx, idcode)
         } else {
             print_jtag_chain(&chain);
             bail!("The provided tap index {tap_idx} does not have an ECP5 IDCODE.");
         }
-    } else if let Some(index) = auto_tap_idx(&chain) {
-        index
+    } else if let Some((index, idcode)) = auto_tap_idx(&chain) {
+        (index, idcode)
     } else {
         print_jtag_chain(&chain);
         bail!("Could not find an ECP5 IDCODE in the JTAG chain.");
@@ -239,7 +246,7 @@ fn main() -> anyhow::Result<()> {
     let tap = jtag.into_tap(chain, tap_idx)?;
 
     // Create an ECP5 instance from the TAP.
-    let mut ecp5 = ECP5::new(tap);
+    let mut ecp5 = ECP5::new(tap, idcode);
 
     // We can finally handle 'program' and 'flash' commands.
     match matches.subcommand_name() {
@@ -251,6 +258,15 @@ fn main() -> anyhow::Result<()> {
             let matches = matches.subcommand_matches("program").unwrap();
             let path = matches.get_one::<String>("file").unwrap();
             let mut bitstream = Bitstream::from_path(path)?;
+            if matches.get_flag("remove-idcode") {
+                bitstream.remove_idcode()?;
+            } else {
+                let fix_idcode = matches.get_flag("fix-idcode");
+                bitstream.check_and_fix_idcode(ecp5.idcode(), fix_idcode)?;
+            }
+            if matches.get_flag("remove-spimode") {
+                bitstream.remove_spimode()?;
+            }
             if quiet {
                 ecp5.program(bitstream.data())?;
             } else {
@@ -382,7 +398,7 @@ fn print_jtag_chain(chain: &JTAGChain) {
     let idcodes = chain.idcodes();
     let lines = chain.to_lines();
     for (idcode, line) in idcodes.iter().zip(lines.iter()) {
-        if let Some(Some(ecp5)) = idcode.map(|id| ECP5IDCODE::try_from_idcode(&id)) {
+        if let Some(Some(ecp5)) = idcode.map(|id| ECP5IDCODE::try_from_idcode(id)) {
             println!(" - {} [{}]", line, ecp5.name());
         } else {
             println!(" - {}", line);
