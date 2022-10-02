@@ -1,7 +1,7 @@
 // Copyright 2022 Adam Greig
 // Licensed under the Apache-2.0 and MIT licenses.
 
-use std::{fs::File, path::Path, io::Read, collections::HashSet};
+use std::{fs::File, path::Path, io::Read, collections::HashSet, ops::Range};
 use num_enum::TryFromPrimitive;
 use crate::{Result, Error, ECP5IDCODE};
 
@@ -158,7 +158,7 @@ impl Bitstream {
                 for (idx, byte) in (idcode as u32).to_be_bytes().iter().enumerate() {
                     self.data[verify_id.1 + idx] = *byte;
                 }
-                self.fix_crc(verify_id.1);
+                self.fix_crc_change(verify_id.1..(verify_id.1 + 4));
                 Ok(())
             } else {
                 log::warn!("Not patching because --no-fix-idcode was set.");
@@ -209,14 +209,84 @@ impl Bitstream {
         Ok(())
     }
 
+    /// Replace the SPI_MODE command, if any, with NOOPs.
+    ///
+    /// If the bitstream metadata parsing was not successful or no SPI_MODE command
+    /// was found, no action is taken.
+    pub fn remove_spimode(&mut self) -> Result<()> {
+        let meta = match &mut self.meta {
+            Some(meta) => meta,
+            None => {
+                log::debug!("Skipping remove_spi_mode as no metadata was parsed.");
+                return Ok(());
+            }
+        };
+
+        let spi_mode = match meta.spi_mode {
+            Some(spi_mode) => spi_mode,
+            None => {
+                log::debug!("Skipping remove_spi_mode as no SPI_MODE command found.");
+                return Ok(());
+            }
+        };
+
+        let start = spi_mode.1 - 1;
+        let end = spi_mode.1 + 3;
+        log::warn!("Removing SPI_MODE command for programming SRAM. \
+                    Disable with --no-remove-spimode.");
+        log::info!("Replacing SPI_MODE command at bytes {start}..{end} with NOOP");
+        for x in &mut self.data[start..end] {
+            *x = 0xFF;
+        }
+        self.fix_crc_exclude(start..end);
+        Ok(())
+    }
+
     /// Update whichever CRC is affected by changes to the provided `offset`.
-    fn fix_crc(&mut self, offset: usize) {
-        log::debug!("Fixing CRC affected by change to offset {offset}");
+    ///
+    /// All changes must be covered by the same CRC, in other words the
+    /// changes may not straddle a CRC check/reset point.
+    ///
+    /// Panics if `self.meta` is not available.
+    fn fix_crc_change(&mut self, changes: Range<usize>) {
+        log::debug!("Fixing CRC affected by changes to offset {changes:?}");
+        for crc in self.meta.as_mut().unwrap().stored_crcs.iter_mut() {
+            if crc.start <= changes.start && crc.pos > changes.end {
+                let new_crc = crc.compute(&self.data);
+                log::trace!("Fixing CRC {crc:?} to 0x{new_crc:02X}");
+                self.data[crc.pos] = (new_crc >> 8) as u8;
+                self.data[crc.pos + 1] = new_crc as u8;
+                break;
+            } else if crc.start > changes.start {
+                log::trace!("No affected CRC found, skipping");
+                break;
+            }
+        }
     }
 
     /// Update whichever CRC is affected by excluding the provided offsets.
-    fn fix_crc_exclude(&mut self, exclude: std::ops::Range<usize>) {
+    ///
+    /// All exclusions must be covered by the same CRC, in other words the
+    /// exclusions may not straddle a CRC check/reset point.
+    ///
+    /// Panics if `self.meta` is not available.
+    fn fix_crc_exclude(&mut self, exclude: Range<usize>) {
         log::debug!("Fixing CRC affected by excluding {exclude:?}");
+        for crc in self.meta.as_mut().unwrap().stored_crcs.iter_mut() {
+            if crc.start <= exclude.start && crc.pos > exclude.end {
+                for offset in exclude {
+                    crc.exclude(offset);
+                }
+                let new_crc = crc.compute(&self.data);
+                log::trace!("Fixing CRC {crc:?} to 0x{new_crc:02X}");
+                self.data[crc.pos] = (new_crc >> 8) as u8;
+                self.data[crc.pos + 1] = new_crc as u8;
+                break;
+            } else if crc.start > exclude.start {
+                log::trace!("No affected CRC found, skipping");
+                break;
+            }
+        }
     }
 }
 
