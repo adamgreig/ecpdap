@@ -58,13 +58,8 @@ impl<'a> Reader<'a> {
         x
     }
 
-    /// Look at next byte without consuming it.
-    fn peek(&self) -> Result<u8, ParseError> {
-        self.data.get(self.offset).copied().ok_or(ParseError::Exhausted)
-    }
-
     /// Look at next n bytes without consuming them.
-    fn peek_n(&self, n: usize) -> Result<&[u8], ParseError> {
+    fn peek(&self, n: usize) -> Result<&[u8], ParseError> {
         self.data.get(self.offset..(self.offset + n)).ok_or(ParseError::Exhausted)
     }
 
@@ -95,7 +90,7 @@ impl<'a> Reader<'a> {
 
     /// Verify the next bytes match the provided slice and skip them.
     fn check_skip(&mut self, x: &[u8]) -> Result<(), ParseError> {
-        let data = self.peek_n(x.len())?;
+        let data = self.peek(x.len())?;
         if data != x {
             Err(ParseError::BadCheck { expected: x.to_vec(), read: data.to_vec() })
         } else {
@@ -124,22 +119,20 @@ impl<'a> Reader<'a> {
             if bits.bit(self)? == 0 {
                 // Code 0 represents a whole 0 byte of input.
                 out.push(0);
-            } else {
+            } else if bits.bit(self)? == 0 {
                 if bits.bit(self)? == 0 {
-                    if bits.bit(self)? == 0 {
-                        let pos = bits.bits(self, 3)? as u8;
-                        // Code 100xxx is a single set-bit position.
-                        out.push(1 << pos);
-                    } else {
-                        // Code 101xxx is a stored byte.
-                        let idx = bits.bits(self, 3)? as usize;
-                        out.push(dict[idx]);
-                    }
+                    let pos = bits.bits(self, 3)? as u8;
+                    // Code 100xxx is a single set-bit position.
+                    out.push(1 << pos);
                 } else {
-                    // Code 11xxxxxxxx is a literal byte.
-                    let byte = bits.bits(self, 8)?;
-                    out.push(byte as u8);
+                    // Code 101xxx is a stored byte.
+                    let idx = bits.bits(self, 3)? as usize;
+                    out.push(dict[idx]);
                 }
+            } else {
+                // Code 11xxxxxxxx is a literal byte.
+                let byte = bits.bits(self, 8)?;
+                out.push(byte as u8);
             }
         }
 
@@ -363,7 +356,7 @@ impl BitstreamMeta {
     {
         // Check we have an ID and (if required) a compression dictionary.
         let id = self.verify_id.ok_or(ParseError::NoVerifyId)?.0;
-        let (pad_before, bits_per_frame, pad_after) = id.config_bits_per_frame();
+        let (mut pad_before, bits_per_frame, mut pad_after) = id.config_bits_per_frame();
         if compressed && self.comp_dict.is_none() {
             return Err(ParseError::NoCompDict);
         }
@@ -374,7 +367,16 @@ impl BitstreamMeta {
         let crc_after_each = check_crc && (params & 0x40 == 0);
         let use_dummy_bits = params & 0x20 == 0;
         let use_dummy_bytes = params & 0x10 != 0;
-        let dummy_bytes = if use_dummy_bytes { params & 0x0F } else { 0 };
+        let mut dummy_bytes = (params & 0x0F) as usize;
+        if !use_dummy_bits {
+            log::warn!("Frame doesn't use dummy bits, which is unusual");
+            pad_before = 0;
+            pad_after = 0;
+        }
+        if !use_dummy_bytes {
+            log::warn!("Frame doesn't use dummy bytes, which is unusual");
+            dummy_bytes = 0;
+        }
         let frame_count = u16::from_be_bytes(*rd.take()?);
         let mut bytes_per_frame = (pad_before + bits_per_frame + pad_after) / 8;
         if compressed {
@@ -391,7 +393,7 @@ impl BitstreamMeta {
             if crc_after_each || (check_crc && i == frame_count - 1) {
                 self.check_crc(rd, current_crc)?;
             }
-            rd.skip(dummy_bytes as usize)?;
+            rd.skip(dummy_bytes)?;
         }
         Ok(())
     }

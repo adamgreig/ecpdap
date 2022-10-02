@@ -1,7 +1,7 @@
 // Copyright 2019-2022 Adam Greig
 // Licensed under the Apache-2.0 and MIT licenses.
 
-use std::{io::{Read, Write}, fs::File, time::{Instant, Duration}};
+use std::{io::Write, fs::File, time::{Instant, Duration}};
 use clap::{Command, Arg, ArgAction, crate_description, crate_version, value_parser};
 use anyhow::bail;
 use spi_flash::Flash;
@@ -175,7 +175,7 @@ fn main() -> anyhow::Result<()> {
         if matches.get_flag("remove-idcode") {
             bitstream.remove_idcode()?;
         } else if let Some(device) = matches.get_one::<String>("device") {
-            if let Some(idcode) = ECP5IDCODE::try_from_name(&device) {
+            if let Some(idcode) = ECP5IDCODE::try_from_name(device) {
                 let fix = matches.get_flag("fix-idcode");
                 bitstream.check_and_fix_idcode(idcode, fix)?;
             } else {
@@ -410,7 +410,7 @@ fn print_jtag_chain(chain: &JTAGChain) {
     let idcodes = chain.idcodes();
     let lines = chain.to_lines();
     for (idcode, line) in idcodes.iter().zip(lines.iter()) {
-        if let Some(Some(ecp5)) = idcode.map(|id| ECP5IDCODE::try_from_idcode(id)) {
+        if let Some(Some(ecp5)) = idcode.map(ECP5IDCODE::try_from_idcode) {
             println!(" - {} [{}]", line, ecp5.name());
         } else {
             println!(" - {}", line);

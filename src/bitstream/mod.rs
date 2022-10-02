@@ -34,7 +34,7 @@ struct BitstreamMeta {
 
 /// Commands found in the bitstream.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, TryFromPrimitive)]
-#[allow(non_camel_case_types)]
+#[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 #[repr(u8)]
 enum BitstreamCommandId {
     DUMMY               = 0xFF,
