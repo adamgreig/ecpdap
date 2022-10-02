@@ -80,14 +80,6 @@ fn main() -> anyhow::Result<()> {
             .global(true))
         .subcommand(Command::new("probes")
             .about("List available CMSIS-DAP probes"))
-        .subcommand(Command::new("check")
-            .about("Check bitstream")
-            .arg(Arg::new("file")
-                .help("ECP5 bitstream file to check")
-                .required(true))
-            .arg(Arg::new("device")
-                .help("ECP5 device to check against bitstream")
-                .required(false)))
         .subcommand(Command::new("scan")
             .about("Scan JTAG chain and detect ECP5 IDCODEs"))
         .subcommand(Command::new("reset")
@@ -164,27 +156,6 @@ fn main() -> anyhow::Result<()> {
     // so we just list them and quit early.
     if matches.subcommand_name().unwrap() == "probes" {
         print_probe_list();
-        return Ok(());
-    }
-
-    // Checking bitstreams does not require a probe, so check and quit early.
-    if matches.subcommand_name().unwrap() == "check" {
-        let matches = matches.subcommand_matches("check").unwrap();
-        let path = matches.get_one::<String>("file").unwrap();
-        let mut bitstream = Bitstream::from_path(path)?;
-        if matches.get_flag("remove-idcode") {
-            bitstream.remove_idcode()?;
-        } else if let Some(device) = matches.get_one::<String>("device") {
-            if let Some(idcode) = ECP5IDCODE::try_from_name(device) {
-                let fix = matches.get_flag("fix-idcode");
-                bitstream.check_and_fix_idcode(idcode, fix)?;
-            } else {
-                bail!("Did not recognise device name {device}");
-            }
-        }
-        if matches.get_flag("remove-spimode") {
-            bitstream.remove_spimode()?;
-        }
         return Ok(());
     }
 
