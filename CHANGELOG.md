@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [v0.2.0] - 2022-10-02
+
+* Add support for removing SPI_MODE commands when writing bitstreams to SRAM
+    * Use `--no-remove-spimode` to disable
+* Add support for patching VERIFY_IDCODE commands when writing bitstreams
+    * Use `--no-fix-idcode` to disable
+* Add support for removing VERIFY_IDCODE commands when writing bitstreams
+    * Use `--remove-idcode` to remove VERIFY_IDCODE commands
+* Update to clap v4
+
 ## [v0.1.8] - 2022-07-31
 
 * Update to latest jtagdap 0.1.1, improving CMSIS-DAP detection
