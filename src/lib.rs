@@ -14,6 +14,7 @@ use jtagdap::jtag::{IDCODE, JTAGTAP, JTAGChain, Error as JTAGError};
 use jtagdap::bitvec::{byte_to_bits, bytes_to_bits, bits_to_bytes, drain_u32, Error as BitvecError};
 
 mod bitstream;
+pub use bitstream::Bitstream;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -21,6 +22,13 @@ pub enum Error {
     BadStatus,
     #[error("Cannot access flash memory unless the ECP5 is the only TAP in the JTAG chain.")]
     NotOnlyTAP,
+    #[error(
+        "Bitstream file contains an IDCODE 0x{bitstream:08X} incompatible \
+         with the detected ECP5 IDCODE 0x{jtag:08X}."
+    )]
+    IncompatibleIdcode { bitstream: u32, jtag: u32 },
+    #[error("Could not remove VERIFY_IDCODE because parsing the bitstream failed")]
+    RemoveIdcodeNoMetadata,
     #[error("SPI Flash error")]
     SPIFlash(#[from] spi_flash::Error),
     #[error("JTAG error")]
@@ -73,6 +81,22 @@ impl ECP5IDCODE {
         Self::try_from_idcode(&IDCODE(idcode))
     }
 
+    pub fn try_from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "LFE5U-12"      => Some(ECP5IDCODE::LFE5U_12),
+            "LFE5U-25"      => Some(ECP5IDCODE::LFE5U_25),
+            "LFE5UM-25"     => Some(ECP5IDCODE::LFE5UM_25),
+            "LFE5UM5G-25"   => Some(ECP5IDCODE::LFE5UM5G_25),
+            "LFE5U-45"      => Some(ECP5IDCODE::LFE5U_45),
+            "LFE5UM-45"     => Some(ECP5IDCODE::LFE5UM_45),
+            "LFE5UM5G-45"   => Some(ECP5IDCODE::LFE5UM5G_45),
+            "LFE5U-85"      => Some(ECP5IDCODE::LFE5U_85),
+            "LFE5UM-85"     => Some(ECP5IDCODE::LFE5UM_85),
+            "LFE5UM5G-85"   => Some(ECP5IDCODE::LFE5UM5G_85),
+            _               => None,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             ECP5IDCODE::LFE5U_12 => "LFE5U-12",
@@ -97,7 +121,7 @@ impl ECP5IDCODE {
     /// * LFE5U_45, LFE5UM_45, LFE5UM5G_45
     /// * LFE5U_85, LFE5UM_85, LFE5UM5G_85
     ///
-    pub fn compatible(&self, other: &ECP5IDCODE) -> bool {
+    pub fn compatible(&self, other: ECP5IDCODE) -> bool {
         use ECP5IDCODE::*;
         let lfe5u_25 = &[LFE5U_12, LFE5U_25, LFE5UM_25, LFE5UM5G_25];
         let lfe5u_45 = &[LFE5U_45, LFE5UM_45, LFE5UM5G_45];
@@ -107,17 +131,17 @@ impl ECP5IDCODE {
              | ECP5IDCODE::LFE5UM_25
              | ECP5IDCODE::LFE5UM5G_25
              | ECP5IDCODE::LFE5U_12
-            => lfe5u_25.contains(other),
+            => lfe5u_25.contains(&other),
 
             ECP5IDCODE::LFE5U_45
              | ECP5IDCODE::LFE5UM_45
              | ECP5IDCODE::LFE5UM5G_45
-            => lfe5u_45.contains(other),
+            => lfe5u_45.contains(&other),
 
             ECP5IDCODE::LFE5U_85
              | ECP5IDCODE::LFE5UM_85
              | ECP5IDCODE::LFE5UM5G_85
-            => lfe5u_85.contains(other),
+            => lfe5u_85.contains(&other),
         }
     }
 

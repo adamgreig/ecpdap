@@ -9,7 +9,7 @@ use spi_flash::Flash;
 use jtagdap::probe::{Probe, ProbeInfo};
 use jtagdap::dap::DAP;
 use jtagdap::jtag::{JTAG, JTAGChain};
-use ecpdap::{ECP5, ECP5IDCODE, check_tap_idx, auto_tap_idx};
+use ecpdap::{ECP5, ECP5IDCODE, Bitstream, check_tap_idx, auto_tap_idx};
 
 #[allow(clippy::cognitive_complexity)]
 fn main() -> anyhow::Result<()> {
@@ -63,8 +63,26 @@ fn main() -> anyhow::Result<()> {
              .default_value("192")
              .value_parser(value_parser!(usize))
              .global(true))
+        .arg(Arg::new("fix-idcode")
+            .help("Disable fixing compatible IDCODEs when writing bitstreams")
+            .long("no-fix-idcode")
+            .action(ArgAction::SetFalse)
+            .global(true))
+        .arg(Arg::new("remove-idcode")
+            .help("Replace VERIFY_IDCODE bitstream commands with NOOP when writing bitstreams")
+            .long("remove-idcode")
+            .action(ArgAction::SetTrue)
+            .global(true))
         .subcommand(Command::new("probes")
             .about("List available CMSIS-DAP probes"))
+        .subcommand(Command::new("check")
+            .about("Check bitstream")
+            .arg(Arg::new("file")
+                .help("ECP5 bitstream file to check")
+                .required(true))
+            .arg(Arg::new("device")
+                .help("ECP5 device to check against bitstream")
+                .required(false)))
         .subcommand(Command::new("scan")
             .about("Scan JTAG chain and detect ECP5 IDCODEs"))
         .subcommand(Command::new("reset")
@@ -128,7 +146,7 @@ fn main() -> anyhow::Result<()> {
             )
         .get_matches();
 
-    pretty_env_logger::init_timed();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let t0 = Instant::now();
     let quiet = matches.get_flag("quiet");
 
@@ -136,6 +154,25 @@ fn main() -> anyhow::Result<()> {
     // so we just list them and quit early.
     if matches.subcommand_name().unwrap() == "probes" {
         print_probe_list();
+        return Ok(());
+    }
+
+    // Checking bitstreams does not require a probe, so check and quit early.
+    if matches.subcommand_name().unwrap() == "check" {
+        let matches = matches.subcommand_matches("check").unwrap();
+        let path = matches.get_one::<String>("file").unwrap();
+        let mut bitstream = Bitstream::from_path(path)?;
+        if matches.get_flag("remove-idcode") {
+            bitstream.remove_idcode()?;
+        }
+        if let Some(device) = matches.get_one::<String>("device") {
+            if let Some(idcode) = ECP5IDCODE::try_from_name(&device) {
+                let fix = matches.get_flag("fix-idcode");
+                bitstream.check_and_fix_idcode(idcode, fix)?;
+            } else {
+                bail!("Did not recognise device name {device}");
+            }
+        }
         return Ok(());
     }
 
@@ -213,13 +250,11 @@ fn main() -> anyhow::Result<()> {
         Some("program") => {
             let matches = matches.subcommand_matches("program").unwrap();
             let path = matches.get_one::<String>("file").unwrap();
-            let mut file = File::open(path)?;
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
+            let mut bitstream = Bitstream::from_path(path)?;
             if quiet {
-                ecp5.program(&data)?;
+                ecp5.program(bitstream.data())?;
             } else {
-                ecp5.program_progress(&data)?;
+                ecp5.program_progress(bitstream.data())?;
             }
         },
         Some("flash") => {
@@ -272,13 +307,11 @@ fn main() -> anyhow::Result<()> {
                     let offset = *matches.get_one("offset").unwrap();
                     let verify = !matches.get_flag("no-verify");
                     let reload = !matches.get_flag("no-reload");
-                    let mut file = File::open(path)?;
-                    let mut data = Vec::new();
-                    file.read_to_end(&mut data)?;
+                    let mut bitstream = Bitstream::from_path(path)?;
                     if quiet {
-                        flash.program(offset, &data, verify)?;
+                        flash.program(offset, bitstream.data(), verify)?;
                     } else {
-                        flash.program_progress(offset, &data, verify)?;
+                        flash.program_progress(offset, bitstream.data(), verify)?;
                     }
                     if reload {
                         let mut ecp5 = ecp5_flash.release();

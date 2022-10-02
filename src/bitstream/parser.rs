@@ -1,87 +1,36 @@
 // Copyright 2022 Adam Greig
 // Licensed under the Apache-2.0 and MIT licenses.
 
+use std::time::Instant;
 use std::convert::{TryFrom, TryInto};
-use num_enum::TryFromPrimitive;
 use crate::ECP5IDCODE;
-use super::crc16;
+use super::{BitstreamCommandId, BitstreamMeta, StoredCrc};
 
-/// Commands found in the bitstream.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, TryFromPrimitive)]
-#[allow(non_camel_case_types)]
-#[repr(u8)]
-enum BitstreamCommandId {
-    DUMMY               = 0xFF,
-    VERIFY_ID           = 0xE2,
-    SPI_MODE            = 0x79,
-    JUMP                = 0x7E,
-    LSC_RESET_CRC       = 0x3B,
-    LSC_WRITE_COMP_DIC  = 0x02,
-    LSC_PROG_CNTRL0     = 0x22,
-    LSC_INIT_ADDRESS    = 0x46,
-    LSC_WRITE_ADDRESS   = 0xB4,
-    ISC_PROGRAM_SECURITY= 0xCE,
-    ISC_PROGRAM_USERCODE= 0xC2,
-    ISC_PROGRAM_DONE    = 0x5E,
-    LSC_PROG_INCR_RTI   = 0x82,
-    LSC_PROG_INCR_CMP   = 0xB8,
-    LSC_PROG_SED_CRC    = 0xA2,
-    LSC_EBR_ADDRESS     = 0xF6,
-    LSC_EBR_WRITE       = 0xB2,
-}
-
-/// VERIFY_ID command in bitstream.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(super) struct VerifyId {
-    /// IDCODE to validate against.
-    idcode: u32,
-
-    /// Offset of first byte of IDCODE.
-    offset: usize,
-}
-
-/// SPI_MODE command in bitstream.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(super) struct SpiMode {
-    /// Offset of byte containing the SPI mode.
-    offset: usize,
-}
-
-/// CRC stored in bitstream.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(super) struct StoredCrc {
-    /// Offset of first byte covered by this CRC.
-    start: usize,
-
-    /// Offset of first byte of CRC.
-    pos: usize,
-
-    /// CRC check value.
-    crc: u16,
-}
-
-/// Relevant metadata parsed from a bitstream.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct BitstreamMeta {
-    verify_id: Option<VerifyId>,
-    spi_mode: Option<SpiMode>,
-    stored_crcs: Vec<StoredCrc>,
-    comp_dict: Option<[u8; 8]>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub(super) enum ParseError {
+    #[error("Exhausted: Ran out of bitstream data earlier than expected")]
     Exhausted,
+    #[error("Did not find an initial comment block")]
     NoComment,
+    #[error("Did not find the preamble marker")]
     NoPreamble,
-    InvalidCrc { expected: u16, got: u16 },
-    BadCheck { expected: Vec<u8>, got: Vec<u8> },
+    #[error("Invalid CRC inside bitstream: computed {computed:04x}, read {read:04x}")]
+    InvalidCrc { computed: u16, read: u16 },
+    #[error("Unexpected data: expected {expected:?}, read {read:?}")]
+    BadCheck { expected: Vec<u8>, read: Vec<u8> },
+    #[error("Did not find a VERIFY_ID command, so cannot decode the bitstream")]
     NoVerifyId,
+    #[error("Found an unknown IDCODE 0x{0:08X}")]
     UnknownIdcode(u32),
+    #[error("Did not find a compression dictionary but the configuration data is compressed")]
     NoCompDict,
+    #[error("Found unknown command {0:02X}")]
     UnknownCommand(u8),
 }
 
+/// Read from a slice, keeping track of current position.
+///
+/// Provides convenient methods like peek, skip, and fetching constant-sized arrays.
 struct Reader<'a> {
     data: &'a [u8],
     offset: usize,
@@ -130,6 +79,8 @@ impl<'a> Reader<'a> {
     }
 
     /// Skip until specific byte will be returned next.
+    ///
+    /// Make sure to advance the offset somehow before calling again or you'll get stuck.
     fn skip_to(&mut self, x: u8) -> Result<(), ParseError> {
         while self.offset < self.data.len() && self.data[self.offset] != x {
             self.offset += 1;
@@ -146,7 +97,7 @@ impl<'a> Reader<'a> {
     fn check_skip(&mut self, x: &[u8]) -> Result<(), ParseError> {
         let data = self.peek_n(x.len())?;
         if data != x {
-            Err(ParseError::BadCheck { expected: x.to_vec(), got: data.to_vec() })
+            Err(ParseError::BadCheck { expected: x.to_vec(), read: data.to_vec() })
         } else {
             self.skip(x.len())?;
             Ok(())
@@ -161,9 +112,10 @@ impl<'a> Reader<'a> {
                  .ok_or(ParseError::Exhausted)
     }
 
-    /// Read compressed bytes according to the ECP5 bitstream compression.
+    /// Read compressed bytes using ECP5 bitstream compression.
     ///
     /// Returns exactly `n` decompressed bytes or an error.
+    #[allow(unused)]
     fn read_compressed(&mut self, n: usize, dict: &[u8; 8]) -> Result<Vec<u8>, ParseError> {
         let mut out = Vec::with_capacity(n);
         let mut bits = BitReader::new();
@@ -194,6 +146,26 @@ impl<'a> Reader<'a> {
         Ok(out)
     }
 
+    /// Skip compressed bytes using ECP5 bitstream compression.
+    ///
+    /// Skips exactly `n` decompressed bytes.
+    fn skip_compressed(&mut self, n: usize) -> Result<(), ParseError> {
+        let mut bits = BitReader::new();
+        for _ in 0..n {
+            // 0 bits map to a whole byte, so only read extra bits on 1.
+            if bits.bit(self)? == 1 {
+                if bits.bit(self)? == 0 {
+                    // 10yxxx always requires 4 additional bits.
+                    bits.bits(self, 4)?;
+                } else {
+                    // 11xxxxxxxx always requires 8 additional bits.
+                    bits.bits(self, 8)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Check if internal offset is now at the end of the input data.
     fn eof(&self) -> bool {
         self.offset >= self.data.len()
@@ -213,9 +185,10 @@ impl BitReader {
     fn bit(&mut self, rd: &mut Reader) -> Result<u8, ParseError> {
         if self.bits_left == 0 {
             self.bits = rd.next()? as u32;
-            self.bits_left += 7;
+            self.bits_left += 8;
         }
-        Ok((self.bits >> (self.bits_left - 1)) as u8 & 1)
+        self.bits_left -= 1;
+        Ok((self.bits >> (self.bits_left)) as u8 & 1)
     }
 
     fn bits(&mut self, rd: &mut Reader, n: usize) -> Result<u32, ParseError> {
@@ -224,15 +197,16 @@ impl BitReader {
             self.bits = (self.bits << 8) | (rd.next()? as u32);
             self.bits_left += 8;
         }
-        let bits = (self.bits >> (self.bits_left - 1 - n)) & ((1 << n) - 1);
         self.bits_left -= n;
-        Ok(bits)
+        Ok((self.bits >> (self.bits_left)) & ((1 << n) - 1))
     }
 }
 
 impl BitstreamMeta {
     /// Parse the provided bitstream, extracting the relevant metadata.
     pub fn parse(input: &[u8]) -> Result<Self, ParseError> {
+        log::info!("Parsing bitstream for metadata");
+        let t0 = Instant::now();
         let mut rd = Reader::new(input);
 
         // Check start of comment block.
@@ -241,10 +215,9 @@ impl BitstreamMeta {
         }
 
         // Skip through to end of comment block.
-        while rd.peek_n(2)? != &[0x00, 0xFF] {
+        while rd.take()? != &[0x00, 0xFF] {
             rd.skip_to(0x00)?;
         }
-        rd.skip(2)?;
 
         // Check preamble.
         if rd.take()? != &[0xFF, 0xFF, 0xBD, 0xB3] {
@@ -257,39 +230,50 @@ impl BitstreamMeta {
             stored_crcs: Vec::new(),
             comp_dict: None,
         };
-        let mut crc_start = 0;
+        let mut current_crc = StoredCrc::new();
 
         // Process commands.
         loop {
             match BitstreamCommandId::try_from(rd.next()?) {
-                Ok(BitstreamCommandId::DUMMY) => {},
+                Ok(BitstreamCommandId::DUMMY) => {
+                    // Don't include DUMMY bytes in CRC processing.
+                    current_crc.exclude(rd.offset() - 1);
+                },
                 Ok(BitstreamCommandId::VERIFY_ID) => {
                     rd.check_skip(&[0, 0, 0])?;
                     let offset = rd.offset();
                     let idcode = u32::from_be_bytes(*rd.take()?);
-                    meta.verify_id = Some(VerifyId { idcode, offset });
+                    let idcode = ECP5IDCODE::try_from_u32(idcode)
+                                             .ok_or(ParseError::UnknownIdcode(idcode))?;
+                    log::trace!("VERIFY_ID command for IDCODE 0x{:08X} ({})",
+                                idcode as u32, idcode.name());
+                    meta.verify_id = Some((idcode, offset));
                 },
                 Ok(BitstreamCommandId::SPI_MODE) => {
                     let offset = rd.offset();
-                    let _mode = rd.next()?;
+                    let mode = rd.next()?;
+                    log::trace!("SPI_MODE command for mode {mode:02X}");
                     rd.check_skip(&[0, 0])?;
-                    meta.spi_mode = Some(SpiMode { offset });
+                    meta.spi_mode = Some((mode, offset));
                 },
                 Ok(BitstreamCommandId::LSC_RESET_CRC) => {
+                    log::trace!("LSC_RESET_CRC command");
                     rd.check_skip(&[0, 0, 0])?;
-                    crc_start = rd.offset();
+                    current_crc.start(rd.offset());
                 },
                 Ok(BitstreamCommandId::LSC_WRITE_COMP_DIC) => {
+                    log::trace!("LSC_WRITE_COMP_DIC command");
                     let crc_check = rd.next()?;
                     rd.check_skip(&[0, 0])?;
                     meta.comp_dict = Some(u64::from_be_bytes(*rd.take()?).to_le_bytes());
-                    meta.maybe_check_crc(crc_check, &mut rd, &mut crc_start)?;
+                    meta.maybe_check_crc(crc_check, &mut rd, &mut current_crc)?;
                 },
                 Ok(BitstreamCommandId::ISC_PROGRAM_USERCODE) => {
+                    log::trace!("ISC_PROGRAM_USERCODE command");
                     let crc_check = rd.next()?;
                     rd.check_skip(&[0, 0])?;
                     rd.skip(4)?;
-                    meta.maybe_check_crc(crc_check, &mut rd, &mut crc_start)?;
+                    meta.maybe_check_crc(crc_check, &mut rd, &mut current_crc)?;
                 },
                 Ok(BitstreamCommandId::JUMP)
                     | Ok(BitstreamCommandId::LSC_PROG_CNTRL0)
@@ -310,18 +294,21 @@ impl BitstreamMeta {
                     rd.skip(8)?;
                 },
                 Ok(BitstreamCommandId::LSC_EBR_WRITE) => {
+                    log::trace!("LSC_EBR_WRITE command");
                     let crc_check = rd.next()?;
                     let num_frames = u16::from_be_bytes(*rd.take()?);
                     for _ in 0..num_frames {
                         rd.skip(9)?;
                     }
-                    meta.maybe_check_crc(crc_check, &mut rd, &mut crc_start)?;
+                    meta.maybe_check_crc(crc_check, &mut rd, &mut current_crc)?;
                 },
                 Ok(BitstreamCommandId::LSC_PROG_INCR_RTI) => {
-                    meta.read_frame(&mut rd, false, &mut crc_start)?;
+                    log::trace!("LSC_PROG_INCR_RTI command");
+                    meta.read_frame(&mut rd, false, &mut current_crc)?;
                 },
                 Ok(BitstreamCommandId::LSC_PROG_INCR_CMP) => {
-                    meta.read_frame(&mut rd, true, &mut crc_start)?;
+                    log::trace!("LSC_PROG_INCR_CMP command");
+                    meta.read_frame(&mut rd, true, &mut current_crc)?;
                 },
                 Err(e) => {
                     return Err(ParseError::UnknownCommand(e.number));
@@ -330,6 +317,8 @@ impl BitstreamMeta {
 
             // Stop looking for commands if we reached the end of the bitstream.
             if rd.eof() {
+                let elapsed = t0.elapsed().as_millis();
+                log::debug!("Parsed to end of bitstream in {elapsed}ms");
                 break;
             }
         }
@@ -340,40 +329,40 @@ impl BitstreamMeta {
     /// Verify a trailing CRC16 after a command/frame.
     ///
     /// Validates the CRC and updates `stored_crcs` as appropriate.
-    fn check_crc(&mut self, rd: &mut Reader, start: &mut usize)
+    fn check_crc(&mut self, rd: &mut Reader, current_crc: &mut StoredCrc)
         -> Result<(), ParseError>
     {
         let pos = rd.offset();
         let crc = u16::from_be_bytes(*rd.take()?);
-        let expected = crc16(&rd.input()[*start..pos]);
-        if expected != crc {
-            return Err(ParseError::InvalidCrc { expected, got: crc });
+        current_crc.finish(pos);
+        let computed = current_crc.compute(rd.input());
+        if computed != crc {
+            return Err(ParseError::InvalidCrc { computed, read: crc });
         }
-        self.stored_crcs.push(StoredCrc { start: *start, pos, crc });
-        *start = rd.offset();
+        self.stored_crcs.push(current_crc.clone());
+        current_crc.start(rd.offset());
         Ok(())
     }
 
     /// Conditionally verify a trailing CRC16 if set.
-    fn maybe_check_crc(&mut self, check: u8, rd: &mut Reader, start: &mut usize)
+    fn maybe_check_crc(&mut self, check: u8, rd: &mut Reader, current_crc: &mut StoredCrc)
         -> Result<(), ParseError>
     {
         if check & 0x80 != 0 {
-            self.check_crc(rd, start)
+            self.check_crc(rd, current_crc)
         } else {
             Ok(())
         }
     }
 
-    /// Read configuration frame data, which may be compressed.
+    /// Skip configuration frame data, which may be compressed.
     ///
     /// Requires `verify_id` to determine frame size, and if compressed, a `comp_dict`.
-    fn read_frame(&mut self, rd: &mut Reader, compressed: bool, crc_start: &mut usize)
+    fn read_frame(&mut self, rd: &mut Reader, compressed: bool, current_crc: &mut StoredCrc)
         -> Result<(), ParseError>
     {
         // Check we have an ID and (if required) a compression dictionary.
-        let id = self.verify_id.ok_or(ParseError::NoVerifyId)?.idcode;
-        let id = ECP5IDCODE::try_from_u32(id).ok_or(ParseError::UnknownIdcode(id))?;
+        let id = self.verify_id.ok_or(ParseError::NoVerifyId)?.0;
         let (pad_before, bits_per_frame, pad_after) = id.config_bits_per_frame();
         if compressed && self.comp_dict.is_none() {
             return Err(ParseError::NoCompDict);
@@ -384,7 +373,7 @@ impl BitstreamMeta {
         let check_crc = params & 0x80 != 0;
         let crc_after_each = check_crc && (params & 0x40 == 0);
         let use_dummy_bits = params & 0x20 == 0;
-        let use_dummy_bytes = params & 0x10 == 0;
+        let use_dummy_bytes = params & 0x10 != 0;
         let dummy_bytes = if use_dummy_bytes { params & 0x0F } else { 0 };
         let frame_count = u16::from_be_bytes(*rd.take()?);
         let mut bytes_per_frame = (pad_before + bits_per_frame + pad_after) / 8;
@@ -395,13 +384,14 @@ impl BitstreamMeta {
         // Skip through frame data.
         for i in 0..frame_count {
             if compressed {
-                rd.read_compressed(bytes_per_frame, &self.comp_dict.unwrap())?;
+                rd.skip_compressed(bytes_per_frame)?;
             } else {
                 rd.skip(bytes_per_frame)?;
             }
             if crc_after_each || (check_crc && i == frame_count - 1) {
-                self.check_crc(rd, crc_start)?;
+                self.check_crc(rd, current_crc)?;
             }
+            rd.skip(dummy_bytes as usize)?;
         }
         Ok(())
     }
@@ -438,6 +428,12 @@ mod tests {
 
     #[test]
     fn test_parse_simple() {
+        let mut crc = StoredCrc::new();
+        crc.start(20);
+        for i in &[20, 21, 22, 23, 32, 33, 34, 35] {
+            crc.exclude(*i);
+        }
+        crc.finish(48);
         assert_eq!(
             BitstreamMeta::parse(&[
                 0xFF, 0x00, b'c', b'o', b'm', b'm', 0x00, 0xFF,
@@ -445,12 +441,12 @@ mod tests {
                 0x3B, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
                 0xE2, 0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78,
                 0xFF, 0xFF, 0xFF, 0xFF, 0x79, 0xAB, 0x00, 0x00,
-                0xC2, 0x80, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78, 0xE7, 0xF0,
+                0xC2, 0x80, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78, 0x3A, 0x5A,
             ]),
             Ok(BitstreamMeta {
-                verify_id: Some(VerifyId { idcode: 0x12345678, offset: 28 }),
-                spi_mode: Some(SpiMode { offset: 37 }),
-                stored_crcs: vec![ StoredCrc { start: 20, pos: 48, crc: 0xE7F0 } ],
+                verify_id: Some((0x12345678, 28)),
+                spi_mode: Some((0xAB, 37)),
+                stored_crcs: vec![ crc ],
                 comp_dict: None,
             }),
         );
