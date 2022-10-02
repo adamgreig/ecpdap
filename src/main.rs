@@ -151,9 +151,13 @@ fn main() -> anyhow::Result<()> {
             )
         .get_matches();
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let t0 = Instant::now();
     let quiet = matches.get_flag("quiet");
+    if quiet {
+        env_logger::init();
+    } else {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    }
 
     // Listing probes does not require first connecting to a probe,
     // so we just list them and quit early.
@@ -324,6 +328,12 @@ fn main() -> anyhow::Result<()> {
                     let verify = !matches.get_flag("no-verify");
                     let reload = !matches.get_flag("no-reload");
                     let mut bitstream = Bitstream::from_path(path)?;
+                    if matches.get_flag("remove-idcode") {
+                        bitstream.remove_idcode()?;
+                    } else {
+                        let fix_idcode = matches.get_flag("fix-idcode");
+                        bitstream.check_and_fix_idcode(ecp5.idcode(), fix_idcode)?;
+                    }
                     if quiet {
                         flash.program(offset, bitstream.data(), verify)?;
                     } else {
