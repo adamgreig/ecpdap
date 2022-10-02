@@ -73,12 +73,12 @@ impl From<&ECP5IDCODE> for IDCODE {
 }
 
 impl ECP5IDCODE {
-    pub fn try_from_idcode(idcode: &IDCODE) -> Option<Self> {
+    pub fn try_from_idcode(idcode: IDCODE) -> Option<Self> {
         Self::try_from(idcode.0).ok()
     }
 
     pub fn try_from_u32(idcode: u32) -> Option<Self> {
-        Self::try_from_idcode(&IDCODE(idcode))
+        Self::try_from_idcode(IDCODE(idcode))
     }
 
     pub fn try_from_name(name: &str) -> Option<Self> {
@@ -170,21 +170,21 @@ impl ECP5IDCODE {
 }
 
 /// Check whether the provided TAP index in a JTAGChain is an ECP5.
-pub fn check_tap_idx(chain: &JTAGChain, index: usize) -> bool {
+pub fn check_tap_idx(chain: &JTAGChain, index: usize) -> Option<ECP5IDCODE> {
     match chain.idcodes().iter().nth(index) {
-        Some(Some(idcode)) => ECP5IDCODE::try_from_idcode(idcode).is_some(),
-        _ => false,
+        Some(Some(idcode)) => ECP5IDCODE::try_from_idcode(*idcode),
+        _ => None,
     }
 }
 
 /// Attempt to discover a unique TAP index for an ECP5 device in a JTAGChain.
-pub fn auto_tap_idx(chain: &JTAGChain) -> Option<usize> {
-    let ecp5_idxs: Vec<usize> = chain
+pub fn auto_tap_idx(chain: &JTAGChain) -> Option<(usize, ECP5IDCODE)> {
+    let ecp5_idxs: Vec<(usize, ECP5IDCODE)> = chain
         .idcodes()
         .iter()
         .enumerate()
         .filter_map(|(idx, id)| id.map(|id| (idx, id)))
-        .filter_map(|(idx, id)| ECP5IDCODE::try_from_idcode(&id).map(|_| idx))
+        .filter_map(|(idx, id)| ECP5IDCODE::try_from_idcode(id).map(|id| (idx, id)))
         .collect();
     let len = ecp5_idxs.len();
     if len == 0 {
@@ -194,9 +194,9 @@ pub fn auto_tap_idx(chain: &JTAGChain) -> Option<usize> {
         log::info!("Multiple ECP5 devices found in JTAG chain, specify one using --tap");
         None
     } else {
-        let index = ecp5_idxs.first().unwrap();
+        let (index, idcode) = ecp5_idxs.first().unwrap();
         log::debug!("Automatically selecting ECP5 at TAP {}", index);
-        Some(*index)
+        Some((*index, *idcode))
     }
 }
 
@@ -367,11 +367,16 @@ impl fmt::Debug for Status {
 /// ECP5 FPGA manager
 pub struct ECP5 {
     tap: JTAGTAP,
+    idcode: ECP5IDCODE,
 }
 
 impl ECP5 {
-    pub fn new(tap: JTAGTAP) -> Self {
-        ECP5 { tap }
+    pub fn new(tap: JTAGTAP, idcode: ECP5IDCODE) -> Self {
+        ECP5 { tap, idcode }
+    }
+
+    pub fn idcode(&self) -> ECP5IDCODE {
+        self.idcode
     }
 
     /// Read current status register content.
@@ -505,7 +510,10 @@ impl ECP5 {
         match status.bse_error() {
             BSEError::NoError => (),
             error => {
-                log::warn!("BSE error present: {:?}", error);
+                // It seems common to have PRMBError present before programming,
+                // presumably because it failed to find a preamble in an empty
+                // SPI flash or similar. Just emit an info log.
+                log::info!("BSE error present: {:?}", error);
             }
         }
         if !status.jtag_active() {
