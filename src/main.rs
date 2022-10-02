@@ -153,11 +153,12 @@ fn main() -> anyhow::Result<()> {
 
     let t0 = Instant::now();
     let quiet = matches.get_flag("quiet");
-    if quiet {
-        env_logger::init();
+    let env = if quiet {
+        env_logger::Env::default()
     } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    }
+        env_logger::Env::default().default_filter_or("warn")
+    };
+    env_logger::Builder::from_env(env).format_timestamp(None).init();
 
     // Listing probes does not require first connecting to a probe,
     // so we just list them and quit early.
