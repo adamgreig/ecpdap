@@ -1,4 +1,7 @@
-use std::{io::{Read, Write}, fs::File, time::{Instant, Duration}};
+// Copyright 2019-2022 Adam Greig
+// Licensed under the Apache-2.0 and MIT licenses.
+
+use std::{io::Write, fs::File, time::{Instant, Duration}};
 use clap::{Command, Arg, ArgAction, crate_description, crate_version, value_parser};
 use anyhow::bail;
 use spi_flash::Flash;
@@ -6,7 +9,7 @@ use spi_flash::Flash;
 use jtagdap::probe::{Probe, ProbeInfo};
 use jtagdap::dap::DAP;
 use jtagdap::jtag::{JTAG, JTAGChain};
-use ecpdap::{ECP5, ECP5IDCODE, check_tap_idx, auto_tap_idx};
+use ecpdap::{ECP5, ECP5IDCODE, Bitstream, check_tap_idx, auto_tap_idx};
 
 #[allow(clippy::cognitive_complexity)]
 fn main() -> anyhow::Result<()> {
@@ -60,6 +63,21 @@ fn main() -> anyhow::Result<()> {
              .default_value("192")
              .value_parser(value_parser!(usize))
              .global(true))
+        .arg(Arg::new("fix-idcode")
+            .help("Disable fixing compatible IDCODEs when writing bitstreams")
+            .long("no-fix-idcode")
+            .action(ArgAction::SetFalse)
+            .global(true))
+        .arg(Arg::new("remove-idcode")
+            .help("Replace VERIFY_IDCODE bitstream commands with NOOP when writing bitstreams")
+            .long("remove-idcode")
+            .action(ArgAction::SetTrue)
+            .global(true))
+        .arg(Arg::new("remove-spimode")
+            .help("Disable removing SPI_MODE commands when writing bitstreams to SRAM")
+            .long("no-remove-spimode")
+            .action(ArgAction::SetFalse)
+            .global(true))
         .subcommand(Command::new("probes")
             .about("List available CMSIS-DAP probes"))
         .subcommand(Command::new("scan")
@@ -125,9 +143,14 @@ fn main() -> anyhow::Result<()> {
             )
         .get_matches();
 
-    pretty_env_logger::init_timed();
     let t0 = Instant::now();
     let quiet = matches.get_flag("quiet");
+    let env = if quiet {
+        env_logger::Env::default()
+    } else {
+        env_logger::Env::default().default_filter_or("warn")
+    };
+    env_logger::Builder::from_env(env).format_timestamp(None).init();
 
     // Listing probes does not require first connecting to a probe,
     // so we just list them and quit early.
@@ -180,16 +203,16 @@ fn main() -> anyhow::Result<()> {
 
     // If the user specified a TAP, we'll use it, but otherwise
     // attempt to find a single ECP5 in the scan chain.
-    let tap_idx = if let Some(&tap_idx) = matches.get_one("tap") {
-        if check_tap_idx(&chain, tap_idx) {
+    let (tap_idx, idcode) = if let Some(&tap_idx) = matches.get_one("tap") {
+        if let Some(idcode) = check_tap_idx(&chain, tap_idx) {
             log::debug!("Provided tap index is an ECP5");
-            tap_idx
+            (tap_idx, idcode)
         } else {
             print_jtag_chain(&chain);
             bail!("The provided tap index {tap_idx} does not have an ECP5 IDCODE.");
         }
-    } else if let Some(index) = auto_tap_idx(&chain) {
-        index
+    } else if let Some((index, idcode)) = auto_tap_idx(&chain) {
+        (index, idcode)
     } else {
         print_jtag_chain(&chain);
         bail!("Could not find an ECP5 IDCODE in the JTAG chain.");
@@ -199,7 +222,8 @@ fn main() -> anyhow::Result<()> {
     let tap = jtag.into_tap(chain, tap_idx)?;
 
     // Create an ECP5 instance from the TAP.
-    let mut ecp5 = ECP5::new(tap);
+    let mut ecp5 = ECP5::new(tap, idcode);
+    let idcode = ecp5.idcode();
 
     // We can finally handle 'program' and 'flash' commands.
     match matches.subcommand_name() {
@@ -210,13 +234,20 @@ fn main() -> anyhow::Result<()> {
         Some("program") => {
             let matches = matches.subcommand_matches("program").unwrap();
             let path = matches.get_one::<String>("file").unwrap();
-            let mut file = File::open(path)?;
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
-            if quiet {
-                ecp5.program(&data)?;
+            let mut bitstream = Bitstream::from_path(path)?;
+            if matches.get_flag("remove-idcode") {
+                bitstream.remove_idcode()?;
             } else {
-                ecp5.program_progress(&data)?;
+                let fix_idcode = matches.get_flag("fix-idcode");
+                bitstream.check_and_fix_idcode(idcode, fix_idcode)?;
+            }
+            if matches.get_flag("remove-spimode") {
+                bitstream.remove_spimode()?;
+            }
+            if quiet {
+                ecp5.program(bitstream.data())?;
+            } else {
+                ecp5.program_progress(bitstream.data())?;
             }
         },
         Some("flash") => {
@@ -269,13 +300,17 @@ fn main() -> anyhow::Result<()> {
                     let offset = *matches.get_one("offset").unwrap();
                     let verify = !matches.get_flag("no-verify");
                     let reload = !matches.get_flag("no-reload");
-                    let mut file = File::open(path)?;
-                    let mut data = Vec::new();
-                    file.read_to_end(&mut data)?;
-                    if quiet {
-                        flash.program(offset, &data, verify)?;
+                    let mut bitstream = Bitstream::from_path(path)?;
+                    if matches.get_flag("remove-idcode") {
+                        bitstream.remove_idcode()?;
                     } else {
-                        flash.program_progress(offset, &data, verify)?;
+                        let fix_idcode = matches.get_flag("fix-idcode");
+                        bitstream.check_and_fix_idcode(idcode, fix_idcode)?;
+                    }
+                    if quiet {
+                        flash.program(offset, bitstream.data(), verify)?;
+                    } else {
+                        flash.program_progress(offset, bitstream.data(), verify)?;
                     }
                     if reload {
                         let mut ecp5 = ecp5_flash.release();
@@ -346,7 +381,7 @@ fn print_jtag_chain(chain: &JTAGChain) {
     let idcodes = chain.idcodes();
     let lines = chain.to_lines();
     for (idcode, line) in idcodes.iter().zip(lines.iter()) {
-        if let Some(Some(ecp5)) = idcode.map(|id| ECP5IDCODE::try_from_idcode(&id)) {
+        if let Some(Some(ecp5)) = idcode.map(ECP5IDCODE::try_from_idcode) {
             println!(" - {} [{}]", line, ecp5.name());
         } else {
             println!(" - {}", line);

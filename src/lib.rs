@@ -1,11 +1,11 @@
-// Copyright 2020, 2021 Adam Greig
+// Copyright 2020-2022 Adam Greig
 // Licensed under the Apache-2.0 and MIT licenses.
 
 //! ecpdap
 //!
 //! ECP5 FPGA and SPI flash programming utility using CMSIS-DAP probes.
 
-use std::convert::TryFrom;
+use std::convert::{From, TryFrom};
 use std::fmt;
 use num_enum::{FromPrimitive, TryFromPrimitive};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -13,18 +13,30 @@ use spi_flash::FlashAccess;
 use jtagdap::jtag::{IDCODE, JTAGTAP, JTAGChain, Error as JTAGError};
 use jtagdap::bitvec::{byte_to_bits, bytes_to_bits, bits_to_bytes, drain_u32, Error as BitvecError};
 
+mod bitstream;
+pub use bitstream::Bitstream;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("ECP5 status register in incorrect state.")]
     BadStatus,
     #[error("Cannot access flash memory unless the ECP5 is the only TAP in the JTAG chain.")]
     NotOnlyTAP,
+    #[error(
+        "Bitstream file contains an IDCODE 0x{bitstream:08X} incompatible \
+         with the detected ECP5 IDCODE 0x{jtag:08X}."
+    )]
+    IncompatibleIdcode { bitstream: u32, jtag: u32 },
+    #[error("Could not remove VERIFY_IDCODE because parsing the bitstream failed")]
+    RemoveIdcodeNoMetadata,
     #[error("SPI Flash error")]
     SPIFlash(#[from] spi_flash::Error),
     #[error("JTAG error")]
     JTAG(#[from] JTAGError),
     #[error("Bitvec error")]
     Bitvec(#[from] BitvecError),
+    #[error("I/O error")]
+    IO(#[from] std::io::Error),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -48,9 +60,41 @@ pub enum ECP5IDCODE {
     LFE5UM5G_85 = 0x81113043,
 }
 
+impl From<ECP5IDCODE> for IDCODE {
+    fn from(id: ECP5IDCODE) -> IDCODE {
+        IDCODE(id as u32)
+    }
+}
+
+impl From<&ECP5IDCODE> for IDCODE {
+    fn from(id: &ECP5IDCODE) -> IDCODE {
+        IDCODE(*id as u32)
+    }
+}
+
 impl ECP5IDCODE {
-    pub fn try_from_idcode(idcode: &IDCODE) -> Option<Self> {
+    pub fn try_from_idcode(idcode: IDCODE) -> Option<Self> {
         Self::try_from(idcode.0).ok()
+    }
+
+    pub fn try_from_u32(idcode: u32) -> Option<Self> {
+        Self::try_from_idcode(IDCODE(idcode))
+    }
+
+    pub fn try_from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "LFE5U-12"      => Some(ECP5IDCODE::LFE5U_12),
+            "LFE5U-25"      => Some(ECP5IDCODE::LFE5U_25),
+            "LFE5UM-25"     => Some(ECP5IDCODE::LFE5UM_25),
+            "LFE5UM5G-25"   => Some(ECP5IDCODE::LFE5UM5G_25),
+            "LFE5U-45"      => Some(ECP5IDCODE::LFE5U_45),
+            "LFE5UM-45"     => Some(ECP5IDCODE::LFE5UM_45),
+            "LFE5UM5G-45"   => Some(ECP5IDCODE::LFE5UM5G_45),
+            "LFE5U-85"      => Some(ECP5IDCODE::LFE5U_85),
+            "LFE5UM-85"     => Some(ECP5IDCODE::LFE5UM_85),
+            "LFE5UM5G-85"   => Some(ECP5IDCODE::LFE5UM5G_85),
+            _               => None,
+        }
     }
 
     pub fn name(&self) -> &'static str {
@@ -67,24 +111,80 @@ impl ECP5IDCODE {
             ECP5IDCODE::LFE5UM5G_85 => "LFE5UM5G-85",
         }
     }
+
+    /// Returns whether the provided IDCODE is considered compatible with
+    /// this IDCODE.
+    ///
+    /// IDCODEs considered compatible:
+    ///
+    /// * LFE5U_12, LFE5U_25, LFE5UM_25, LFE5UM5G_25
+    /// * LFE5U_45, LFE5UM_45, LFE5UM5G_45
+    /// * LFE5U_85, LFE5UM_85, LFE5UM5G_85
+    ///
+    pub fn compatible(&self, other: ECP5IDCODE) -> bool {
+        use ECP5IDCODE::*;
+        let lfe5u_25 = &[LFE5U_12, LFE5U_25, LFE5UM_25, LFE5UM5G_25];
+        let lfe5u_45 = &[LFE5U_45, LFE5UM_45, LFE5UM5G_45];
+        let lfe5u_85 = &[LFE5U_85, LFE5UM_85, LFE5UM5G_85];
+        match self {
+            ECP5IDCODE::LFE5U_25
+             | ECP5IDCODE::LFE5UM_25
+             | ECP5IDCODE::LFE5UM5G_25
+             | ECP5IDCODE::LFE5U_12
+            => lfe5u_25.contains(&other),
+
+            ECP5IDCODE::LFE5U_45
+             | ECP5IDCODE::LFE5UM_45
+             | ECP5IDCODE::LFE5UM5G_45
+            => lfe5u_45.contains(&other),
+
+            ECP5IDCODE::LFE5U_85
+             | ECP5IDCODE::LFE5UM_85
+             | ECP5IDCODE::LFE5UM5G_85
+            => lfe5u_85.contains(&other),
+        }
+    }
+
+    /// Number of configuration bits per frame.
+    ///
+    /// Returns (pad_bits_before_frame, bits_per_frame, pad_bits_after_frame).
+    pub fn config_bits_per_frame(&self) -> (usize, usize, usize) {
+        match self {
+            ECP5IDCODE::LFE5U_25
+              | ECP5IDCODE::LFE5UM_25
+              | ECP5IDCODE::LFE5UM5G_25
+              | ECP5IDCODE::LFE5U_12
+            => (0, 592, 0),
+
+            ECP5IDCODE::LFE5U_45
+              | ECP5IDCODE::LFE5UM_45
+              | ECP5IDCODE::LFE5UM5G_45
+            => (2, 846, 0),
+
+            ECP5IDCODE::LFE5U_85
+              | ECP5IDCODE::LFE5UM_85
+              | ECP5IDCODE::LFE5UM5G_85
+            => (0, 1136, 0),
+        }
+    }
 }
 
 /// Check whether the provided TAP index in a JTAGChain is an ECP5.
-pub fn check_tap_idx(chain: &JTAGChain, index: usize) -> bool {
+pub fn check_tap_idx(chain: &JTAGChain, index: usize) -> Option<ECP5IDCODE> {
     match chain.idcodes().iter().nth(index) {
-        Some(Some(idcode)) => ECP5IDCODE::try_from_idcode(idcode).is_some(),
-        _ => false,
+        Some(Some(idcode)) => ECP5IDCODE::try_from_idcode(*idcode),
+        _ => None,
     }
 }
 
 /// Attempt to discover a unique TAP index for an ECP5 device in a JTAGChain.
-pub fn auto_tap_idx(chain: &JTAGChain) -> Option<usize> {
-    let ecp5_idxs: Vec<usize> = chain
+pub fn auto_tap_idx(chain: &JTAGChain) -> Option<(usize, ECP5IDCODE)> {
+    let ecp5_idxs: Vec<(usize, ECP5IDCODE)> = chain
         .idcodes()
         .iter()
         .enumerate()
         .filter_map(|(idx, id)| id.map(|id| (idx, id)))
-        .filter_map(|(idx, id)| ECP5IDCODE::try_from_idcode(&id).map(|_| idx))
+        .filter_map(|(idx, id)| ECP5IDCODE::try_from_idcode(id).map(|id| (idx, id)))
         .collect();
     let len = ecp5_idxs.len();
     if len == 0 {
@@ -94,9 +194,9 @@ pub fn auto_tap_idx(chain: &JTAGChain) -> Option<usize> {
         log::info!("Multiple ECP5 devices found in JTAG chain, specify one using --tap");
         None
     } else {
-        let index = ecp5_idxs.first().unwrap();
+        let (index, idcode) = ecp5_idxs.first().unwrap();
         log::debug!("Automatically selecting ECP5 at TAP {}", index);
-        Some(*index)
+        Some((*index, *idcode))
     }
 }
 
@@ -267,11 +367,16 @@ impl fmt::Debug for Status {
 /// ECP5 FPGA manager
 pub struct ECP5 {
     tap: JTAGTAP,
+    idcode: ECP5IDCODE,
 }
 
 impl ECP5 {
-    pub fn new(tap: JTAGTAP) -> Self {
-        ECP5 { tap }
+    pub fn new(tap: JTAGTAP, idcode: ECP5IDCODE) -> Self {
+        ECP5 { tap, idcode }
+    }
+
+    pub fn idcode(&self) -> ECP5IDCODE {
+        self.idcode
     }
 
     /// Read current status register content.
@@ -405,7 +510,10 @@ impl ECP5 {
         match status.bse_error() {
             BSEError::NoError => (),
             error => {
-                log::warn!("BSE error present: {:?}", error);
+                // It seems common to have PRMBError present before programming,
+                // presumably because it failed to find a preamble in an empty
+                // SPI flash or similar. Just emit an info log.
+                log::info!("BSE error present: {:?}", error);
             }
         }
         if !status.jtag_active() {
