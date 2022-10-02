@@ -251,6 +251,7 @@ fn main() -> anyhow::Result<()> {
 
     // Create an ECP5 instance from the TAP.
     let mut ecp5 = ECP5::new(tap, idcode);
+    let idcode = ecp5.idcode();
 
     // We can finally handle 'program' and 'flash' commands.
     match matches.subcommand_name() {
@@ -266,7 +267,7 @@ fn main() -> anyhow::Result<()> {
                 bitstream.remove_idcode()?;
             } else {
                 let fix_idcode = matches.get_flag("fix-idcode");
-                bitstream.check_and_fix_idcode(ecp5.idcode(), fix_idcode)?;
+                bitstream.check_and_fix_idcode(idcode, fix_idcode)?;
             }
             if matches.get_flag("remove-spimode") {
                 bitstream.remove_spimode()?;
@@ -332,7 +333,7 @@ fn main() -> anyhow::Result<()> {
                         bitstream.remove_idcode()?;
                     } else {
                         let fix_idcode = matches.get_flag("fix-idcode");
-                        bitstream.check_and_fix_idcode(ecp5.idcode(), fix_idcode)?;
+                        bitstream.check_and_fix_idcode(idcode, fix_idcode)?;
                     }
                     if quiet {
                         flash.program(offset, bitstream.data(), verify)?;
