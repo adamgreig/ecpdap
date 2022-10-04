@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+* Change `-f`/`--freq` clock frequency option to take Hz instead of kHz,
+  but permit using `k` and `M` suffixes e.g. `-f 10M`.
+* Permit using `0x` prefixes for hex offsets and addresses when accessing
+  flash memory.
+
 ## [v0.2.0] - 2022-10-02
 
 * Add support for removing SPI_MODE commands when writing bitstreams to SRAM
