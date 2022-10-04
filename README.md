@@ -15,6 +15,31 @@ when using iCE40 FPGAs, check out [spidap], which uses the same libraries.
 [spi-flash-rs]: https://github.com/adamgreig/spi-flash-rs
 [spidap]: https://github.com/adamgreig/spidap
 
+## IDCODEs and SPI modes
+
+ECP5 bitstreams can specify an IDCODE which the FPGA checks against its
+internal IDCODE. By default this would prevent loading (for example) an
+`LFE5U-45F` bitstream onto an `LFE5UM-45F`, even though it would be
+compatible. By default, `ecpdap` will patch the bitstream IDCODE when
+programming either SRAM or SPI flash to match the IDCODE detected via JTAG.
+Use `--no-fix-idcode` to disable this functionality. Alternatively, use
+`--remove-idcode` to entirely remove the IDCODE check from the bitstream.
+
+Bitstreams can also include an SPI mode command to enable faster bitstream
+loading from SPI flash. However, if a bitstream with such a command is loaded
+directly to SRAM, and the SPI flash does not have a valid bitstream loaded,
+the ECP5 aborts loading the bitstream. To work around this issue, `ecpdap`
+will by default remove SPI mode commands from bitstreams loaded to SRAM.
+Use `--no-remove-spimode` to disable this functionality.
+
+## JTAG Clock Frequency
+
+The default clock frequency is 1MHz, but in many situations higher frequencies
+are possible and reduce operation time. It is also possible to require lower
+speeds in situations with poor signal integrity.
+
+Use `-f` or `--freq` to change, for example `-f 10M`.
+
 ## JTAG Scan Chains
 
 ECP5 FPGAs can be programmed on arbitrary length JTAG scan chains; you may need
@@ -67,7 +92,7 @@ Run `ecpdap help` for detailed usage. Commonly used commands:
 
 * `ecpdap probes`: List all detected CMSIS-DAP probes
 * `ecpdap scan`: Scan the JTAG chain to detect ECP5 devices
-* `ecpdap program bitstream.bit`: Program `bitstream.bit` to the ECP5
+* `ecpdap program bitstream.bit -f10M`: Program `bitstream.bit` to the ECP5 at 10MHz
 * `ecpdap flash id`: Read the flash manufacturer and product IDs
 * `ecpdap flash scan`: Read the flash SFDP metadata and status registers
 * `ecpdap flash write bitstream.bit`: Write `bitstream.bit` to flash memory.
