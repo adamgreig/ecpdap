@@ -1,9 +1,6 @@
 // Copyright 2020-2022 Adam Greig
 // Licensed under the Apache-2.0 and MIT licenses.
-
-//! ecpdap
-//!
-//! ECP5 FPGA and SPI flash programming utility using CMSIS-DAP probes.
+#![doc = include_str!("../README.md")]
 
 use std::convert::{From, TryFrom};
 use std::fmt;

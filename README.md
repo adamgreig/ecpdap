@@ -73,13 +73,13 @@ ECPDAP is also packaged for NixOS under the `ecpdap` attribute.
 
 To build and install for your user, without checking out the repository:
 
-```
+```sh
 cargo install ecpdap
 ```
 
 Or, building locally after checking out this repository:
 
-```
+```sh
 cargo build --release
 ```
 
