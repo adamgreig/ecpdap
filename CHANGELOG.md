@@ -6,6 +6,9 @@
   but permit using `k` and `M` suffixes e.g. `-f 10M`.
 * Permit using `0x` prefixes for hex offsets and addresses when accessing
   flash memory.
+* Move `--no-remove-spimode` flag to only apply to `program` subcommand
+* Add new `-v`/`--verbose` flag to raise log level (specifying the RUST_LOG
+  environment variable still works).
 
 ## [v0.2.0] - 2022-10-02
 

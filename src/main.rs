@@ -22,10 +22,17 @@ fn main() -> anyhow::Result<()> {
         .propagate_version(true)
         .infer_subcommands(true)
         .arg(Arg::new("quiet")
-             .help("Suppress informative output")
+             .help("Suppress informative output and raise log level to errors only")
              .long("quiet")
              .short('q')
              .action(ArgAction::SetTrue)
+             .global(true))
+        .arg(Arg::new("verbose")
+             .help("Increase log level, specify once for info, twice for debug, three times for trace")
+             .long("verbose")
+             .short('v')
+             .action(ArgAction::Count)
+             .conflicts_with("quiet")
              .global(true))
         .arg(Arg::new("probe")
              .help("VID:PID[:SN] of CMSIS-DAP device to use")
@@ -74,11 +81,6 @@ fn main() -> anyhow::Result<()> {
             .long("remove-idcode")
             .action(ArgAction::SetTrue)
             .global(true))
-        .arg(Arg::new("remove-spimode")
-            .help("Disable removing SPI_MODE commands when writing bitstreams to SRAM")
-            .long("no-remove-spimode")
-            .action(ArgAction::SetFalse)
-            .global(true))
         .subcommand(Command::new("probes")
             .about("List available CMSIS-DAP probes"))
         .subcommand(Command::new("scan")
@@ -91,7 +93,12 @@ fn main() -> anyhow::Result<()> {
             .about("Program ECP5 SRAM with bitstream")
             .arg(Arg::new("file")
                  .help("File to program to ECP5")
-                 .required(true)))
+                 .required(true))
+            .arg(Arg::new("remove-spimode")
+                .help("Disable removing SPI_MODE commands when writing bitstreams to SRAM")
+                .long("no-remove-spimode")
+                .action(ArgAction::SetFalse)
+                .global(true)))
         .subcommand(Command::new("flash")
             .about("Access SPI flash attached to ECP5 when no other devices on JTAG chain")
             .subcommand_required(true)
@@ -147,10 +154,17 @@ fn main() -> anyhow::Result<()> {
 
     let t0 = Instant::now();
     let quiet = matches.get_flag("quiet");
+    let verbose = matches.get_count("verbose");
     let env = if quiet {
-        env_logger::Env::default()
-    } else {
+        env_logger::Env::default().default_filter_or("error")
+    } else if verbose == 0 {
         env_logger::Env::default().default_filter_or("warn")
+    } else if verbose == 1 {
+        env_logger::Env::default().default_filter_or("info")
+    } else if verbose == 2 {
+        env_logger::Env::default().default_filter_or("debug")
+    } else {
+        env_logger::Env::default().default_filter_or("trace")
     };
     env_logger::Builder::from_env(env).format_timestamp(None).init();
 
