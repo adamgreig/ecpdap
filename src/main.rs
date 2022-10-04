@@ -3,6 +3,7 @@
 
 use std::{io::Write, fs::File, time::{Instant, Duration}};
 use clap::{Command, Arg, ArgAction, crate_description, crate_version, value_parser};
+use clap_num::{maybe_hex, si_number};
 use anyhow::bail;
 use spi_flash::Flash;
 
@@ -33,12 +34,12 @@ fn main() -> anyhow::Result<()> {
              .action(ArgAction::Set)
              .global(true))
         .arg(Arg::new("freq")
-             .help("JTAG clock frequency to use, in kHz")
+             .help("JTAG clock frequency in Hz (k and M suffixes allowed)")
              .long("freq")
              .short('f')
              .action(ArgAction::Set)
-             .default_value("1000")
-             .value_parser(value_parser!(u32))
+             .default_value("1M")
+             .value_parser(si_number::<u32>)
              .global(true))
         .arg(Arg::new("tap")
              .help("ECP5's TAP position in scan chain (0-indexed, see `scan` output)")
@@ -107,9 +108,9 @@ fn main() -> anyhow::Result<()> {
                      .help("File to write to SPI flash")
                      .required(true))
                 .arg(Arg::new("offset")
-                     .help("Start address (in bytes) to write to")
+                     .help("Start address (in bytes) to write to (decimal, or hex with 0x prefix)")
                      .long("offset")
-                     .value_parser(value_parser!(u32))
+                     .value_parser(maybe_hex::<u32>)
                      .default_value("0"))
                 .arg(Arg::new("no-verify")
                      .help("Disable readback verification")
@@ -126,16 +127,17 @@ fn main() -> anyhow::Result<()> {
                      .help("File to write SPI flash contents to")
                      .required(true))
                 .arg(Arg::new("offset")
-                     .help("Start address (in bytes) of read")
+                     .help("Start address (in bytes) of read (decimal, or hex with 0x prefix)")
                      .long("offset")
                      .action(ArgAction::Set)
-                     .value_parser(value_parser!(u32))
+                     .value_parser(maybe_hex::<u32>)
                      .default_value("0"))
                 .arg(Arg::new("length")
-                     .help("Length (in bytes) of read, defaults to detected capacity")
+                     .help("Length (in bytes) of read, defaults to detected capacity \
+                           (decimal, or hex with 0x prefix)")
                      .long("length")
                      .action(ArgAction::Set)
-                     .value_parser(value_parser!(u32))))
+                     .value_parser(maybe_hex::<usize>)))
             .subcommand(Command::new("protect")
                 .about("Set all block protection bits in status register"))
             .subcommand(Command::new("unprotect")
@@ -179,7 +181,7 @@ fn main() -> anyhow::Result<()> {
 
     // If the user specified a JTAG clock frequency, apply it now.
     if let Some(&freq) = matches.get_one::<u32>("freq") {
-        jtag.set_clock(freq * 1000)?;
+        jtag.set_clock(freq)?;
     }
 
     // If the user specified a JTAG scan chain length, apply it now.
@@ -323,13 +325,11 @@ fn main() -> anyhow::Result<()> {
                     let offset = *matches.get_one("offset").unwrap();
                     let length = if let Some(length) = matches.get_one("length") {
                         *length
-                    } else {
-                        log::info!("No length specified, autodetecting");
-                        if let Some(capacity) = flash.capacity() {
+                    } else if let Some(capacity) = flash.capacity() {
+                            log::info!("No length specified, using detected capacity");
                             capacity
-                        } else {
-                            bail!("Could not detect flash capacity; specify --length instead.");
-                        }
+                    } else {
+                        bail!("Could not detect flash capacity; specify --length instead.");
                     };
                     let mut file = File::create(path)?;
                     let data = if quiet {
