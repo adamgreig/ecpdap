@@ -119,15 +119,15 @@ fn main() -> anyhow::Result<()> {
                      .long("offset")
                      .value_parser(maybe_hex::<u32>)
                      .default_value("0"))
-                .arg(Arg::new("no-verify")
+                .arg(Arg::new("verify")
                      .help("Disable readback verification")
                      .short('n')
                      .long("no-verify")
-                     .action(ArgAction::SetTrue))
-                .arg(Arg::new("no-reload")
+                     .action(ArgAction::SetFalse))
+                .arg(Arg::new("reload")
                      .help("Don't request the ECP5 reload configuration after programming")
                      .long("no-reload")
-                     .action(ArgAction::SetTrue)))
+                     .action(ArgAction::SetFalse)))
             .subcommand(Command::new("read")
                 .about("Read SPI flash contents to file")
                 .arg(Arg::new("file")
@@ -145,6 +145,35 @@ fn main() -> anyhow::Result<()> {
                      .long("length")
                      .action(ArgAction::Set)
                      .value_parser(maybe_hex::<usize>)))
+            .subcommand(Command::new("jump")
+                .about("Read and write ECP5 JUMP command in last page of flash")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .arg(Arg::new("offset")
+                     .help("Offset for jump address, default is last 256 bytes of flash \
+                           (decimal, or hex with 0x prefix)")
+                     .long("offset")
+                     .global(true)
+                     .action(ArgAction::Set)
+                     .value_parser(maybe_hex::<u32>))
+                .subcommand(Command::new("read")
+                    .about("Read ECP5 JUMP command from flash"))
+                .subcommand(Command::new("write")
+                    .about("Write ECP5 JUMP command to flash")
+                    .arg(Arg::new("spimode")
+                         .help("SPI flash read opcode")
+                         .long("spimode")
+                         .default_value("read")
+                         .value_parser(["read", "fast-read", "dual", "quad"])
+                         .action(ArgAction::Set))
+                    .arg(Arg::new("target")
+                         .help("Jump target address (decimal, or hex with 0x prefix)")
+                         .required(true)
+                         .value_parser(maybe_hex::<u32>))
+                    .arg(Arg::new("reload")
+                         .help("Don't request the ECP5 reload configuration after programming")
+                         .long("no-reload")
+                         .action(ArgAction::SetFalse))))
             .subcommand(Command::new("protect")
                 .about("Set all block protection bits in status register"))
             .subcommand(Command::new("unprotect")
@@ -314,8 +343,8 @@ fn main() -> anyhow::Result<()> {
                     let matches = matches.subcommand_matches("write").unwrap();
                     let path = matches.get_one::<String>("file").unwrap();
                     let offset = *matches.get_one("offset").unwrap();
-                    let verify = !matches.get_flag("no-verify");
-                    let reload = !matches.get_flag("no-reload");
+                    let verify = matches.get_flag("verify");
+                    let reload = matches.get_flag("reload");
                     let mut bitstream = Bitstream::from_path(path)?;
                     if matches.get_flag("remove-idcode") {
                         bitstream.remove_idcode()?;
@@ -352,6 +381,66 @@ fn main() -> anyhow::Result<()> {
                         flash.read_progress(offset, length)?
                     };
                     file.write_all(&data)?;
+                },
+                Some("jump") => {
+                    let matches = matches.subcommand_matches("jump").unwrap();
+                    let offset = if let Some(offset) = matches.get_one("offset") {
+                        *offset
+                    } else if let Some(capacity) = flash.capacity() {
+                        let offset = (capacity - 256) as u32;
+                        log::info!("No offset specified, using 0x{offset:06X}");
+                        offset
+                    } else {
+                        // If capacity is unknown, spi-flash will permit writing to this
+                        // large address, and the spi flash itself will ignore any unused
+                        // high bits, leaving us with the right address, so long as it uses
+                        // 3-byte addressing.
+                        let offset = 0x00FFFF00;
+                        log::info!("No offset specified and no capacity detected, using 0x{offset:06X}");
+                        offset
+                    };
+                    match matches.subcommand_name() {
+                        Some("read") => {
+                            let data = flash.read(offset, 256)?;
+                            let bitstream = Bitstream::new(data);
+                            if let Some((spimode, target)) = bitstream.jump() {
+                                let spimode_name = match spimode {
+                                    0x03 => "read",
+                                    0x0B => "fast-read",
+                                    0xBB => "dual",
+                                    0xEB => "quad",
+                                    _    => "unknown",
+                                };
+                                println!("Found JUMP to 0x{target:06X} with SPI opcode \
+                                         0x{spimode:02X} ({spimode_name})");
+                            } else {
+                                println!("No JUMP command found");
+                            }
+                        },
+                        Some("write") => {
+                            let matches = matches.subcommand_matches("write").unwrap();
+                            let target = matches.get_one::<u32>("target").unwrap();
+                            let reload = matches.get_flag("reload");
+                            let spimode = match matches.get_one::<String>("spimode").unwrap().as_str() {
+                                "read" => 0x03,
+                                "fast-read" => 0x0B,
+                                "dual" => 0xBB,
+                                "quad" => 0xEB,
+                                _ => panic!("Unhandled flash jump spimode"),
+                            };
+                            let bitstream = Bitstream::from_jump(spimode, *target);
+                            if quiet {
+                                flash.program(offset, bitstream.data(), true)?;
+                            } else {
+                                flash.program_progress(offset, bitstream.data(), true)?;
+                            }
+                            if reload {
+                                let mut ecp5 = ecp5_flash.release();
+                                ecp5.refresh()?;
+                            }
+                        },
+                        _ => panic!("Unhandled flash jump subcommand."),
+                    }
                 },
                 Some("protect") => {
                     if !quiet { println!("Setting block protection bits...") };

@@ -478,6 +478,8 @@ impl ECP5 {
             return Err(Error::NotOnlyTAP);
         }
 
+        log::info!("Placing ECP5 into SPI flash pass-through mode");
+
         // Enable ISC to erase SRAM content, required before SPI passthrough is used.
         self.tap.run_test_idle(0)?;
         self.command(Command::ISC_ENABLE)?;

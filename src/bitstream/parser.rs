@@ -10,8 +10,6 @@ use super::{BitstreamCommandId, BitstreamMeta, StoredCrc};
 pub(super) enum ParseError {
     #[error("Exhausted: Ran out of bitstream data earlier than expected")]
     Exhausted,
-    #[error("Did not find an initial comment block")]
-    NoComment,
     #[error("Did not find the preamble marker")]
     NoPreamble,
     #[error("Invalid CRC inside bitstream: computed {computed:04x}, read {read:04x}")]
@@ -202,18 +200,22 @@ impl BitstreamMeta {
         let t0 = Instant::now();
         let mut rd = Reader::new(input);
 
-        // Check start of comment block.
-        if rd.take()? != &[0xFF, 0x00] {
-            return Err(ParseError::NoComment);
+        // Detect comment block at start and skip it.
+        if rd.peek(2)? == &[0xFF, 0x00] {
+            while rd.take()? != &[0x00, 0xFF] {
+                rd.skip_to(0x00)?;
+            }
         }
 
-        // Skip through to end of comment block.
-        while rd.take()? != &[0x00, 0xFF] {
-            rd.skip_to(0x00)?;
+        // Skip any further dummy bytes until start of preamble.
+        match rd.skip_to(0xBD) {
+            Ok(_) => (),
+            Err(ParseError::Exhausted) => Err(ParseError::NoPreamble)?,
+            Err(e) => Err(e)?,
         }
 
         // Check preamble.
-        if rd.take()? != &[0xFF, 0xFF, 0xBD, 0xB3] {
+        if rd.take()? != &[0xBD, 0xB3] {
             return Err(ParseError::NoPreamble);
         }
 
@@ -222,6 +224,7 @@ impl BitstreamMeta {
             spi_mode: None,
             stored_crcs: Vec::new(),
             comp_dict: None,
+            jump: None,
         };
         let mut current_crc = StoredCrc::new();
 
@@ -268,8 +271,15 @@ impl BitstreamMeta {
                     rd.skip(4)?;
                     meta.maybe_check_crc(crc_check, &mut rd, &mut current_crc)?;
                 },
-                Ok(BitstreamCommandId::JUMP)
-                    | Ok(BitstreamCommandId::LSC_PROG_CNTRL0)
+                Ok(BitstreamCommandId::JUMP) => {
+                    rd.check_skip(&[0, 0, 0])?;
+                    let data = u32::from_be_bytes(*rd.take()?);
+                    let spimode = (data >> 24) as u8;
+                    let target = data & 0x00FF_FFFF;
+                    meta.jump = Some((spimode, target));
+                    log::trace!("JUMP command: SPI mode 0x{spimode:02X}, target 0x{target:06X}");
+                },
+                Ok(BitstreamCommandId::LSC_PROG_CNTRL0)
                     | Ok(BitstreamCommandId::LSC_WRITE_ADDRESS)
                     | Ok(BitstreamCommandId::ISC_PROGRAM_SECURITY)
                     | Ok(BitstreamCommandId::LSC_EBR_ADDRESS)
@@ -404,18 +414,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_no_comment() {
-        assert_eq!(
-            BitstreamMeta::parse(&[
-                0xFF, 0xFF, 0xBD, 0xB3, 0xFF, 0xFF, 0xFF, 0xFF,
-                0xE2, 0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78,
-                0xFF, 0xFF, 0xFF, 0xFF, 0x79, 0xAB, 0x00, 0x00,
-            ]),
-            Err(ParseError::NoComment),
-        );
-    }
-
-    #[test]
     fn test_no_preamble() {
         assert_eq!(
             BitstreamMeta::parse(&[
@@ -450,6 +448,28 @@ mod tests {
                 spi_mode: Some((0xAB, 37)),
                 stored_crcs: vec![ crc ],
                 comp_dict: None,
+                jump: None,
+            }),
+        );
+    }
+
+    #[test]
+    fn test_parse_jump() {
+        assert_eq!(
+            BitstreamMeta::parse(&[
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xBD, 0xB3, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x7E, 0x00, 0x00, 0x00, 0x03, 0x1C, 0x00, 0x00,
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            ]),
+            Ok(BitstreamMeta {
+                verify_id: None,
+                spi_mode: None,
+                stored_crcs: vec![],
+                comp_dict: None,
+                jump: Some((0x03, 0x1c0000)),
             }),
         );
     }

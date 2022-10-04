@@ -30,6 +30,8 @@ struct BitstreamMeta {
     comp_dict: Option<[u8; 8]>,
     /// Locations and included bytes of all CRCs in bitstream.
     stored_crcs: Vec<StoredCrc>,
+    /// SPI mode and target of detected JUMP command.
+    jump: Option<(u8, u32)>,
 }
 
 /// Commands found in the bitstream.
@@ -104,6 +106,33 @@ impl Bitstream {
             },
         };
         Self { data, meta }
+    }
+
+    /// Create a new bitstream that just contains a JUMP command
+    /// to the specified target.
+    pub fn from_jump(spi_mode: u8, target: u32) -> Self {
+        let target = target.to_be_bytes();
+        // JUMP mini bitstream as per TN-02203.
+        // 16 bytes of 0xFF which are ignored by the ECP5,
+        // 2 byte preamble 0xBDB3
+        // 1 byte Write Control Register 0 0x22
+        // 3 bytes command information 0x00_0000
+        // 4 bytes control register 0x0000_0000
+        // 1 byte JUMP 0x7E
+        // 3 bytes command information 0x00_0000
+        // 1 byte SPI mode
+        // 3 bytes target
+        // 16 bytes of 0xFF trailer.
+        let mut data = vec![0xFF; 50];
+        data[16] = 0xBD;
+        data[17] = 0xB3;
+        data[18] = 0x22;
+        data[19..26].copy_from_slice(&[0; 7]);
+        data[26] = 0x7E;
+        data[27..30].copy_from_slice(&[0; 3]);
+        data[30] = spi_mode;
+        data[31..34].copy_from_slice(&target[1..]);
+        Self::new(data)
     }
 
     /// Get the underlying bitstream data.
@@ -242,6 +271,11 @@ impl Bitstream {
         Ok(())
     }
 
+    /// Return any parsed JUMP metadata from the bitstream.
+    pub fn jump(&self) -> Option<(u8, u32)> {
+        self.meta.as_ref().and_then(|meta| meta.jump)
+    }
+
     /// Update whichever CRC is affected by changes to the provided `offset`.
     ///
     /// All changes must be covered by the same CRC, in other words the
@@ -335,5 +369,16 @@ impl StoredCrc {
             }
         }
         crc
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_jump() {
+        let bitstream = Bitstream::from_jump(0x03, 0x1c0000);
+        assert_eq!(bitstream.jump(), Some((0x03, 0x1c0000)));
     }
 }

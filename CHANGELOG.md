@@ -9,6 +9,8 @@
 * Move `--no-remove-spimode` flag to only apply to `program` subcommand
 * Add new `-v`/`--verbose` flag to raise log level (specifying the RUST_LOG
   environment variable still works).
+* Add new `flash jump` subcommand which can read or write a small JUMP
+  bitstream at the end of the SPI flash, used for dual boot mode.
 
 ## [v0.2.0] - 2022-10-02
 
