@@ -10,6 +10,9 @@ use spi_flash::FlashAccess;
 use jtagdap::jtag::{IDCODE, JTAGTAP, JTAGChain, Error as JTAGError};
 use jtagdap::bitvec::{byte_to_bits, bytes_to_bits, bits_to_bytes, drain_u32, Error as BitvecError};
 
+pub use jtagdap;
+pub use spi_flash;
+
 mod bitstream;
 pub use bitstream::Bitstream;
 

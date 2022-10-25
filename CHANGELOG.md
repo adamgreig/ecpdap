@@ -11,6 +11,7 @@
   environment variable still works).
 * Add new `flash jump` subcommand which can read or write a small JUMP
   bitstream at the end of the SPI flash, used for dual boot mode.
+* Re-export `jtagdap` and `spi_flash` dependencies.
 
 ## [v0.2.0] - 2022-10-02
 
