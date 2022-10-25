@@ -201,7 +201,7 @@ impl BitstreamMeta {
         let mut rd = Reader::new(input);
 
         // Detect comment block at start and skip it.
-        if rd.peek(2)? == &[0xFF, 0x00] {
+        if rd.peek(2)? == [0xFF, 0x00] {
             while rd.take()? != &[0x00, 0xFF] {
                 rd.skip_to(0x00)?;
             }
