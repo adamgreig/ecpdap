@@ -365,13 +365,13 @@ impl fmt::Debug for Status {
 }
 
 /// ECP5 FPGA manager
-pub struct ECP5 {
-    tap: JTAGTAP,
+pub struct ECP5<'a> {
+    tap: &'a mut JTAGTAP<'a>,
     idcode: ECP5IDCODE,
 }
 
-impl ECP5 {
-    pub fn new(tap: JTAGTAP, idcode: ECP5IDCODE) -> Self {
+impl<'a> ECP5<'a> {
+    pub fn new(tap: &'a mut JTAGTAP<'a>, idcode: ECP5IDCODE) -> Self {
         ECP5 { tap, idcode }
     }
 
@@ -471,7 +471,7 @@ impl ECP5 {
 
     /// Place ECP5 into flash pass-through mode.
     /// The current SRAM contents are cleared.
-    pub fn into_flash(mut self) -> Result<ECP5Flash> {
+    pub fn into_flash(mut self) -> Result<ECP5Flash<'a>> {
         if self.tap.n_taps() > 1 {
             log::error!(
                 "SPI flash access is not possible with more than one TAP in the JTAG chain.");
@@ -573,21 +573,21 @@ impl std::convert::From<Error> for spi_flash::Error {
 }
 
 /// Access to attached SPI flash on an ECP5.
-pub struct ECP5Flash {
-    ecp5: ECP5,
+pub struct ECP5Flash<'a> {
+    ecp5: ECP5<'a>,
 }
 
-impl ECP5Flash {
-    fn new(ecp5: ECP5) -> Self {
+impl<'a> ECP5Flash<'a> {
+    fn new(ecp5: ECP5<'a>) -> Self {
         ECP5Flash { ecp5 }
     }
 
-    pub fn release(self) -> ECP5 {
+    pub fn release(self) -> ECP5<'a> {
         self.ecp5
     }
 }
 
-impl FlashAccess for ECP5Flash {
+impl<'a> FlashAccess for ECP5Flash<'a> {
     type Error = Error;
 
     fn write(&mut self, data: &[u8]) -> Result<()> {

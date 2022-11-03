@@ -264,10 +264,10 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Create a TAP instance, consuming the JTAG instance.
-    let tap = jtag.into_tap(chain, tap_idx)?;
+    let mut tap = jtag.tap(&chain, tap_idx)?;
 
     // Create an ECP5 instance from the TAP.
-    let mut ecp5 = ECP5::new(tap, idcode);
+    let mut ecp5 = ECP5::new(&mut tap, idcode);
     let idcode = ecp5.idcode();
 
     // We can finally handle 'program' and 'flash' commands.

@@ -17,4 +17,4 @@ clap = { version = "4.0.7", features = ["cargo", "unicode"] }
 clap-num = "1.0.0"
 indicatif = "0.17.0"
 spi-flash = "0.3.0"
-jtagdap = "0.1.1"
+jtagdap = { version = "0.1.1", path = "../jtagdap" }
