@@ -11,14 +11,12 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
+        run: |
+          rustup self update
+          rustup toolchain install stable --profile minimal
 
       - name: Install additional targets
         run: |
@@ -32,11 +30,11 @@ jobs:
 
       - name: Download libusb DLLs for Windows
         run: |
-          wget https://github.com/libusb/libusb/releases/download/v1.0.23/libusb-1.0.23.7z
+          wget https://github.com/libusb/libusb/releases/download/v1.0.25/libusb-1.0.25.7z
           mkdir libusb
-          mv libusb-1.0.23.7z libusb/
+          mv libusb-1.0.25.7z libusb/
           cd libusb
-          7z x libusb-1.0.23.7z
+          7z x libusb-1.0.25.7z
 
       - name: Build for Linux x86_64
         run: |
@@ -66,12 +64,14 @@ jobs:
           body: |
             In this release:
 
-
             The following pre-built files are available:
               * `ecpdap_linux_x86_64`: ecpdap software for Linux (64-bit)
               * `ecpdap_windows_x86_64.exe`: ecpdap software for Windows (64-bit)
 
-            ecpdap recommends libusb be installed; on Linux it should suffice to install libusb-1.0, on Windows download the pre-built DLLs from [libusb.info](https://libusb.info/) and either install them system-wide or put them in the same directory as your executable. Without libusb, only the slower HID-based CMSIS-DAPv1 protocol is available.
+            ecpdap requires libusb:
+
+            * on Linux, it usually suffices to install libusb-1.0
+            * on Windows, download the pre-built DLLs from [libusb.info](https://libusb.info) and place `libusb-1.0.dll` from `MinGW64/dll` in the same directory as the ecpdap executable.
 
       - name: Upload ecpdap for Linux x86_64
         uses: actions/upload-release-asset@v1

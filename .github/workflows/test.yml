@@ -6,35 +6,32 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
       - name: Install libusb
         run: |
           sudo apt-get update
           sudo apt-get install -y libusb-dev libusb-1.0
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        run: |
+          rustup self update
+          rustup toolchain install stable --profile minimal
       - name: Run tests
         run: cargo test --all
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     continue-on-error: true
     steps:
       - name: Install libusb
         run: |
           sudo apt-get update
           sudo apt-get install -y libusb-dev libusb-1.0
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-          components: clippy
-      - uses: actions-rs/clippy-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup self update
+          rustup toolchain install stable --profile minimal
+          rustup component add clippy
+      - name: Clippy
+        run: cargo clippy

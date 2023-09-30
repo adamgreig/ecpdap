@@ -67,9 +67,8 @@ ECPDAP is also packaged for NixOS under the `ecpdap` attribute.
 
 * You must have a working Rust compiler installed.
   Visit [rustup.rs](https://rustup.rs) to install Rust.
-* [libusb] is recommended to use the higher-speed CMSIS-DAPv2 protocol, where
-  supported by your probe.
-* You may need to set up drivers or permissions to access the USB device.
+* [libusb] is required to use the higher-speed CMSIS-DAPv2 protocol, where supported by your probe.
+* You may need to set up drivers or permissions to access the USB device, see `drivers/` for details
 
 To build and install for your user, without checking out the repository:
 
