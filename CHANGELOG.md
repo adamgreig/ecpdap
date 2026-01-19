@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-01-19
+
 * Change `-f`/`--freq` clock frequency option to take Hz instead of kHz,
   but permit using `k` and `M` suffixes e.g. `-f 10M`.
 * Permit using `0x` prefixes for hex offsets and addresses when accessing
@@ -69,6 +71,7 @@
 * Initial release.
 
 [Unreleased]: https://github.com/adamgreig/ecpdap/compare/v0.2.0...HEAD
+[v0.3.0]: https://github.com/adamgreig/ecpdap/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/adamgreig/ecpdap/compare/v0.1.8...v0.2.0
 [v0.1.8]: https://github.com/adamgreig/ecpdap/compare/v0.1.7...v0.1.8
 [v0.1.7]: https://github.com/adamgreig/ecpdap/compare/v0.1.6...v0.1.7
