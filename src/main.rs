@@ -89,6 +89,8 @@ fn main() -> anyhow::Result<()> {
             .about("Pulse the JTAG nRST line for 100ms"))
         .subcommand(Command::new("reload")
             .about("Request the ECP5 reload its configuration"))
+        .subcommand(Command::new("uid")
+            .about("Read the ECP5 TraceID register"))
         .subcommand(Command::new("program")
             .about("Program ECP5 SRAM with bitstream")
             .arg(Arg::new("file")
@@ -275,6 +277,11 @@ fn main() -> anyhow::Result<()> {
         Some("reload") => {
             if !quiet { println!("Reloading ECP5 configuration...") };
             ecp5.refresh()?;
+        },
+        Some("uid") => {
+            if !quiet { println!("Reading TraceID register...") };
+            let uid = ecp5.read_uid()?;
+            println!("{uid:016X}");
         },
         Some("program") => {
             let matches = matches.subcommand_matches("program").unwrap();

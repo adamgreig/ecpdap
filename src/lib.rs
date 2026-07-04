@@ -244,6 +244,7 @@ enum Command {
     LSC_PROG_OTP = 0xF9,
     LSC_READ_OTP = 0xFA,
     LSC_BACKGROUND_SPI = 0x3A,
+    UIDCODE_PUB = 0x19,
 }
 
 impl Command {
@@ -386,6 +387,15 @@ impl ECP5 {
         let data = self.tap.read_dr(32)?;
         let (status, _) = drain_u32(&data)?;
         Ok(Status::new(status))
+    }
+
+    /// Read UID/TRACEID
+    pub fn read_uid(&mut self) -> Result<u64> {
+        log::trace!("Reading TRACEID");
+        self.command(Command::UIDCODE_PUB)?;
+        let data = self.tap.read_dr(64)?;
+        let (uid, _) = jtagdap::bitvec::drain_word(&data, 64)?;
+        Ok(uid)
     }
 
     /// Program the ECP5 configuration SRAM with the bitstream in `data`.
