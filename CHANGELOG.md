@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-07-04
+
+* Add `uid` command (and `read_uid()` method) to read ECP5 TraceID
+
 ## [v0.3.0] - 2026-01-19
 
 * Change `-f`/`--freq` clock frequency option to take Hz instead of kHz,
@@ -70,7 +74,8 @@
 
 * Initial release.
 
-[Unreleased]: https://github.com/adamgreig/ecpdap/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/adamgreig/ecpdap/compare/v0.4.0...HEAD
+[v0.3.0]: https://github.com/adamgreig/ecpdap/compare/v0.3.0...v0.4.0
 [v0.3.0]: https://github.com/adamgreig/ecpdap/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/adamgreig/ecpdap/compare/v0.1.8...v0.2.0
 [v0.1.8]: https://github.com/adamgreig/ecpdap/compare/v0.1.7...v0.1.8
